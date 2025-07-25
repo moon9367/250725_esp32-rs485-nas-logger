@@ -1,4 +1,4 @@
-#include <ModbusMaster.h>
+#include <ModbusMaster.h> // 라이브러리 설치 필요
 #include <WiFi.h>
 #include <HTTPClient.h>
 #include <time.h>
@@ -10,9 +10,9 @@
 #define RS485_DE_RE 4
 #define BAUDRATE 9600
 
-const char* ssid = "YOUR_WIFI_SSID"; // 와이파이 이름 입력력
-const char* password = "YOUR_WIFI_PASSWORD"; // 비밀번호 입력
-const char* nas_url = "http://NAS_IP/upload.php"; // NAS IP로 수정
+const char* ssid = "TSPOL"; // 와이파이 이름 입력력
+const char* password = "mms56529983"; // 비밀번호 입력
+const char* nas_url = "http://tspol.iptime.org:8888/rs485/upload.php"; // NAS IP로 수정
 // =========================
 
 ModbusMaster node;
