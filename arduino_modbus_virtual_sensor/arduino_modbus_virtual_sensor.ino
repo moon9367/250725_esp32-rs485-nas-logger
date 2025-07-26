@@ -17,8 +17,8 @@ int rxIndex = 0;
 
 // float → 2워드 변환 (워드 내 빅엔디언, 워드 간 리틀엔디언)
 void floatToRegs(float val, int idx) {
-  // 배열 범위 검사
-  if (idx < 0 || idx >= 10) return; // 10까지만 (12-2)
+  // 배열 범위 검사 (12개 레지스터이므로 인덱스 10까지 가능)
+  if (idx < 0 || idx > 10) return; // 0~10까지 허용 (레지스터 0~11 사용)
   
   union {
     float f;

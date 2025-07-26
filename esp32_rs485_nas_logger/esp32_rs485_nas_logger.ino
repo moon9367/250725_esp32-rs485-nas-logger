@@ -17,6 +17,16 @@ const char* nas_url = "http://tspol.iptime.org:8888/rs485/upload.php"; // NAS IP
 
 ModbusMaster node;
 
+// 전역 변수 (Task 간 공유)
+volatile float sensorData[6] = {0, 0, 0, 0, 0, 0};
+volatile bool newDataAvailable = false;
+SemaphoreHandle_t dataMutex;
+
+// 수집된 데이터 저장용
+float dataBuffer[60][6]; // 최대 60개 데이터 저장
+int dataCount = 0;
+unsigned long lastCollectTime = 0;
+
 void preTransmission()  { digitalWrite(RS485_DE_RE, HIGH); }
 void postTransmission() { digitalWrite(RS485_DE_RE, LOW);  }
 
@@ -48,51 +58,37 @@ void setup() {
   Serial.println("NTP Sync OK");
   
   Serial.println("=== 시스템 초기화 완료 ===");
+  
+  // Mutex 생성
+  dataMutex = xSemaphoreCreateMutex();
+  
+  // Task 생성
+  xTaskCreatePinnedToCore(
+    dataCollectionTask,   // Task 함수
+    "DataCollection",     // Task 이름
+    4096,                 // Stack 크기
+    NULL,                 // Parameter
+    1,                    // Priority
+    NULL,                 // Task Handle
+    0                     // CPU Core (0번 코어)
+  );
+  
+  xTaskCreatePinnedToCore(
+    dataTransmissionTask, // Task 함수
+    "DataTransmission",   // Task 이름
+    8192,                 // Stack 크기 (HTTP 전송용으로 크게)
+    NULL,                 // Parameter
+    1,                    // Priority
+    NULL,                 // Task Handle
+    1                     // CPU Core (1번 코어)
+  );
+  
+  Serial.println("=== 멀티태스킹 시작 ===");
 }
 
 void loop() {
-  // Arduino에서 보내는 테스트 메시지 확인 (디버깅용)
-  if (Serial2.available()) {
-    String receivedData = Serial2.readStringUntil('\n');
-    if (receivedData.startsWith("TEST_MESSAGE")) {
-      Serial.print("Arduino에서 받은 메시지: ");
-      Serial.println(receivedData);
-    }
-  }
-  
-  // Modbus 통신 (10초마다)
-  static unsigned long lastModbusTime = 0;
-  if (millis() - lastModbusTime > 10000) { // 10초마다
-    Serial.println("=== Modbus 통신 시작 ===");
-    
-    float sum[6] = {0, 0, 0, 0, 0, 0};
-    int count = 0;
-    for (int i = 0; i < 6; i++) { // 6초 동안 1초마다 측정 (빠른 테스트)
-      float sensors[6];
-      if (readSensors(sensors)) {
-        for (int j = 0; j < 6; j++) sum[j] += sensors[j];
-        count++;
-      } else {
-        Serial.println("Modbus read fail");
-      }
-      delay(1000); // 1초 대기
-    }
-    // 평균값 계산
-    float avg[6];
-    if (count > 0) {
-      for (int j = 0; j < 6; j++) avg[j] = sum[j] / count;
-    } else {
-      for (int j = 0; j < 6; j++) avg[j] = 0;
-    }
-    String csv = makeCSV(avg);
-    Serial.println(csv);
-    sendToNAS(csv);
-    
-    lastModbusTime = millis();
-    Serial.println("=== Modbus 통신 완료 ===");
-  }
-  
-  delay(1000); // 1초 대기
+  // Task가 모든 작업을 처리하므로 loop는 비움
+  vTaskDelay(pdMS_TO_TICKS(1000));
 }
 
 // Modbus로 12워드(6 float) 읽기
@@ -218,13 +214,92 @@ void sendToNAS(String csv) {
   if (WiFi.status() == WL_CONNECTED) {
     HTTPClient http;
     http.begin(nas_url);
+    http.setTimeout(15000); // 15초 타임아웃 (기본 5초에서 증가)
     http.addHeader("Content-Type", "application/x-www-form-urlencoded");
     String postData = "csv_line=" + csv;
-    int code = http.POST(postData);
-    if (code == 200) Serial.println("전송 성공");
-    else Serial.printf("전송 실패: %d\n", code);
+    
+    // 최대 2번 시도
+    for (int retry = 0; retry < 2; retry++) {
+      int code = http.POST(postData);
+      if (code == 200) {
+        Serial.println("전송 성공");
+        break;
+      } else {
+        Serial.printf("전송 실패 (시도 %d/2): %d\n", retry+1, code);
+        if (retry == 0) delay(1000); // 1초 대기 후 재시도
+      }
+    }
     http.end();
   } else {
     Serial.println("WiFi 연결 안됨");
+  }
+} 
+
+// Task 1: 데이터 수집 (5초마다 연속)
+void dataCollectionTask(void* parameter) {
+  while (true) {
+    float sensors[6];
+    if (readSensors(sensors)) {
+      // Mutex로 데이터 보호
+      if (xSemaphoreTake(dataMutex, pdMS_TO_TICKS(100)) == pdTRUE) {
+        // 데이터 버퍼에 저장
+        if (dataCount < 60) {
+          for (int i = 0; i < 6; i++) {
+            dataBuffer[dataCount][i] = sensors[i];
+          }
+          dataCount++;
+          lastCollectTime = millis();
+          Serial.printf("수집 %d - 온도: %.1f°C, 습도: %.1f%%, 강우: %.0f\n", 
+                       dataCount, sensors[0], sensors[1], sensors[5]);
+        }
+        xSemaphoreGive(dataMutex);
+      }
+    }
+    vTaskDelay(pdMS_TO_TICKS(5000)); // 5초 대기
+  }
+}
+
+// Task 2: 평균값 계산 및 전송 (1분마다)
+void dataTransmissionTask(void* parameter) {
+  while (true) {
+    // 현재 시간 확인
+    time_t now = time(nullptr);
+    struct tm* timeinfo = localtime(&now);
+    
+    // 매 분 00초에 전송
+    if (timeinfo->tm_sec == 0) {
+      if (xSemaphoreTake(dataMutex, pdMS_TO_TICKS(1000)) == pdTRUE) {
+        if (dataCount > 0) {
+          Serial.printf("=== 1분간 수집 완료 (%d개) ===\n", dataCount);
+          
+          // 평균값 계산
+          float avg[6] = {0, 0, 0, 0, 0, 0};
+          for (int i = 0; i < dataCount; i++) {
+            for (int j = 0; j < 6; j++) {
+              avg[j] += dataBuffer[i][j];
+            }
+          }
+          for (int j = 0; j < 6; j++) {
+            avg[j] /= dataCount;
+          }
+          
+          Serial.printf("평균값 - 온도: %.1f°C, 습도: %.1f%%, 조도: %.0f Lux, 풍속: %.1f m/s, 풍향: %.0f°, 강우: %.1f\n",
+                       avg[0], avg[1], avg[2], avg[3], avg[4], avg[5]);
+          
+          // CSV 생성 및 전송
+          String csv = makeCSV(avg);
+          Serial.println("CSV: " + csv);
+          sendToNAS(csv);
+          
+          // 버퍼 초기화
+          dataCount = 0;
+        }
+        xSemaphoreGive(dataMutex);
+        
+        // 다음 분까지 대기
+        vTaskDelay(pdMS_TO_TICKS(1000));
+      }
+    }
+    vTaskDelay(pdMS_TO_TICKS(100)); // 0.1초마다 시간 체크
   }
 } 
