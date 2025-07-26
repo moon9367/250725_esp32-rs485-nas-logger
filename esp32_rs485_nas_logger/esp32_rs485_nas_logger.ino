@@ -91,7 +91,7 @@ void loop() {
   vTaskDelay(pdMS_TO_TICKS(1000));
 }
 
-// Modbus로 12워드(6 float) 읽기
+// Modbus로 64워드(32 float) 읽기 - 실제 장비 프로토콜 대응
 bool readSensors(float* sensors) {
   Serial.println("Modbus 요청 시작...");
   
@@ -100,8 +100,9 @@ bool readSensors(float* sensors) {
     Serial2.read();
   }
   
-  // 직접 Modbus RTU 요청 전송
-  byte request[] = {0x01, 0x03, 0x00, 0x00, 0x00, 0x0C, 0x45, 0xCF}; // CRC는 미리 계산된 값
+  // 직접 Modbus RTU 요청 전송 (실제 장비 프로토콜)
+  // 01 03 00 CB 00 40 35 C4 (CRC 수정됨)
+  byte request[] = {0x01, 0x03, 0x00, 0xCB, 0x00, 0x40, 0x35, 0xC4}; // 시작주소 0x00CB, 64개 레지스터
   
   digitalWrite(RS485_DE_RE, HIGH); // 송신 모드
   delay(1);
@@ -115,18 +116,18 @@ bool readSensors(float* sensors) {
   // 응답 대기 및 수신
   delay(200); // 더 긴 응답 대기 (200ms)
   
-  byte response[50];
+  byte response[150]; // 133바이트 응답 + 여유분
   int responseIndex = 0;
   
   // 반복적으로 응답 읽기 (최대 1000ms 동안)
   unsigned long startTime = millis();
   while (millis() - startTime < 1000) {
-    while (Serial2.available() && responseIndex < 50) {
+    while (Serial2.available() && responseIndex < 150) {
       response[responseIndex++] = Serial2.read();
     }
     
-    // 충분한 데이터를 받았으면 종료
-    if (responseIndex >= 29) {
+    // 충분한 데이터를 받았으면 종료 (133바이트 기대)
+    if (responseIndex >= 133) {
       break;
     }
     
@@ -137,9 +138,10 @@ bool readSensors(float* sensors) {
     Serial.print("Modbus 응답 (");
     Serial.print(responseIndex);
     Serial.print("바이트): ");
-    for (int i = 0; i < responseIndex; i++) {
+    for (int i = 0; i < min(responseIndex, 20); i++) { // 처음 20바이트만 출력
       Serial.printf("0x%02X ", response[i]);
     }
+    if (responseIndex > 20) Serial.print("...");
     Serial.println();
     
     // Modbus 응답 시작 위치 찾기 (0x01 0x03 패턴 검색)
@@ -151,20 +153,14 @@ bool readSensors(float* sensors) {
       }
     }
     
-    if (startIndex >= 0 && (responseIndex - startIndex) >= 29) {
+    if (startIndex >= 0 && (responseIndex - startIndex) >= 133) {
       Serial.printf("Modbus 응답 시작 위치 발견: %d\n", startIndex);
       
       // 올바른 위치에서 응답 파싱
-      if (response[startIndex] == 0x01 && response[startIndex+1] == 0x03) {
+      if (response[startIndex] == 0x01 && response[startIndex+1] == 0x03 && response[startIndex+2] == 0x80) {
         Serial.println("Modbus 응답 파싱 성공!");
         
-        // 12개 레지스터 추출 (시작위치+3부터)
-        for (int i = 0; i < 12; i++) {
-          uint16_t reg = (response[startIndex+3 + i*2] << 8) | response[startIndex+4 + i*2];
-          Serial.printf("레지스터[%d]: 0x%04X\n", i, reg);
-        }
-        
-        // 센서 값 변환
+        // 첫 6개 센서만 변환 (기존 호환성 유지)
         for (int i = 0; i < 6; i++) {
           uint16_t reg1 = (response[startIndex+3 + i*4] << 8) | response[startIndex+4 + i*4];
           uint16_t reg2 = (response[startIndex+5 + i*4] << 8) | response[startIndex+6 + i*4];
@@ -174,9 +170,9 @@ bool readSensors(float* sensors) {
         return true;
       }
     } else {
-      Serial.println("Modbus 응답 파싱 실패: 0x01 0x03 패턴을 찾을 수 없음");
-      if (responseIndex > 1) {
-        Serial.printf("첫 바이트: 0x%02X, 두 번째 바이트: 0x%02X\n", response[0], response[1]);
+      Serial.println("Modbus 응답 파싱 실패: 0x01 0x03 0x80 패턴을 찾을 수 없음");
+      if (responseIndex > 2) {
+        Serial.printf("첫 3바이트: 0x%02X 0x%02X 0x%02X\n", response[0], response[1], response[2]);
       }
     }
   } else {

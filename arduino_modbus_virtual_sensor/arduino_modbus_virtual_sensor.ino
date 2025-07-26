@@ -8,8 +8,8 @@
 // SoftwareSerial 객체 생성
 SoftwareSerial rs485(RS485_RX, RS485_TX); // RX, TX 순서
 
-// Modbus holding 레지스터 배열 (12워드 = 6 float)
-uint16_t holdingRegs[12];
+// Modbus holding 레지스터 배열 (64워드 = 32 float)
+uint16_t holdingRegs[64];
 
 // Modbus 통신 버퍼
 byte rxBuffer[256];
@@ -17,8 +17,8 @@ int rxIndex = 0;
 
 // float → 2워드 변환 (워드 내 빅엔디언, 워드 간 리틀엔디언)
 void floatToRegs(float val, int idx) {
-  // 배열 범위 검사 (12개 레지스터이므로 인덱스 10까지 가능)
-  if (idx < 0 || idx > 10) return; // 0~10까지 허용 (레지스터 0~11 사용)
+  // 배열 범위 검사 (64개 레지스터이므로 인덱스 62까지 가능)
+  if (idx < 0 || idx > 62) return; // 0~62까지 허용 (레지스터 0~63 사용)
   
   union {
     float f;
@@ -125,25 +125,25 @@ void processModbusRequest() {
     Serial.print(", 레지스터수=");
     Serial.println(registerCount);
     
-    if (startAddr == 0x0000 && registerCount == 12) {
-      // 응답 데이터 준비 (12 레지스터 = 24 바이트)
-      byte responseData[24];
+    if (startAddr == 0x00CB && registerCount == 64) { // 시작주소 0x00CB, 64개 레지스터
+      // 응답 데이터 준비 (64 레지스터 = 128 바이트)
+      byte responseData[128];
       
-      for (int i = 0; i < 12; i++) {
+      for (int i = 0; i < 64; i++) {
         responseData[i*2] = (holdingRegs[i] >> 8) & 0xFF;     // High byte
         responseData[i*2 + 1] = holdingRegs[i] & 0xFF;        // Low byte
       }
       
       Serial.println("=== Modbus 응답 전송 시작 ===");
-      Serial.print("Slave ID: 1, Function: 0x03, Data Length: 24");
+      Serial.print("Slave ID: 1, Function: 0x03, Data Length: 128");
       Serial.println();
       
-      sendModbusResponse(1, 0x03, responseData, 24);
+      sendModbusResponse(1, 0x03, responseData, 128);
       Serial.println("=== Modbus 응답 전송 완료 ===");
       
       // 디버깅: 전송된 데이터 출력
       Serial.print("전송 데이터: ");
-      for (int i = 0; i < 12; i++) {
+      for (int i = 0; i < 64; i++) {
         Serial.print("0x");
         if (holdingRegs[i] < 0x1000) Serial.print("0");
         if (holdingRegs[i] < 0x100) Serial.print("0");
@@ -172,7 +172,7 @@ void setup() {
   digitalWrite(RS485_DE_RE, LOW); // 수신 모드로 시작
   
   // holding 레지스터 초기화
-  for (int i = 0; i < 12; i++) {
+  for (int i = 0; i < 64; i++) {
     holdingRegs[i] = 0;
   }
   
@@ -182,21 +182,33 @@ void setup() {
 }
 
 void loop() {
-  // 센서값 생성 (랜덤)
-  float temp     = random(200, 350) / 10.0;   // 20.0~35.0℃
-  float hum      = random(300, 900) / 10.0;   // 30~90%
-  float solar    = random(0, 1000);           // 0~1000 Lux
-  float wind_spd = random(0, 150) / 10.0;     // 0~15.0 m/s
-  float wind_dir = random(0, 360);            // 0~359°
-  float rain     = random(0, 2);              // 0 or 1
+  // 32개 센서값 생성 (랜덤) - 실제 장비 프로토콜 대응
+  float sensorData[32];
+  
+  // 기본 6개 센서 (기존과 동일)
+  sensorData[0] = random(200, 350) / 10.0;   // 온도 (20.0~35.0°C)
+  sensorData[1] = random(300, 900) / 10.0;   // 습도 (30~90%)
+  sensorData[2] = random(0, 1000);           // 조도 (0~1000 Lux)
+  sensorData[3] = random(0, 150) / 10.0;     // 풍속 (0~15.0 m/s)
+  sensorData[4] = random(0, 360);            // 풍향 (0~359°)
+  sensorData[5] = random(0, 2);              // 강우센서 (0 or 1)
+  
+  // 추가 26개 센서 (확장된 가상 센서)
+  for (int i = 6; i < 32; i++) {
+    switch (i % 6) {
+      case 0: sensorData[i] = random(150, 400) / 10.0; break;  // 온도 변형
+      case 1: sensorData[i] = random(200, 950) / 10.0; break;  // 습도 변형
+      case 2: sensorData[i] = random(0, 1500); break;          // 조도 변형
+      case 3: sensorData[i] = random(0, 200) / 10.0; break;    // 풍속 변형
+      case 4: sensorData[i] = random(0, 360); break;           // 풍향 변형
+      case 5: sensorData[i] = random(0, 2); break;             // 디지털 센서
+    }
+  }
 
-  // holding 레지스터에 저장
-  floatToRegs(temp,     0);  // 0x0000~0x0001
-  floatToRegs(hum,      2);  // 0x0002~0x0003
-  floatToRegs(solar,    4);  // 0x0004~0x0005
-  floatToRegs(wind_spd, 6);  // 0x0006~0x0007
-  floatToRegs(wind_dir, 8);  // 0x0008~0x0009
-  floatToRegs(rain,    10);  // 0x000A~0x000B
+  // holding 레지스터에 저장 (32개 float → 64개 레지스터)
+  for (int i = 0; i < 32; i++) {
+    floatToRegs(sensorData[i], i * 2);  // 각 float는 2개 레지스터 사용
+  }
 
   // Modbus 요청 수신 및 처리
   while (rs485.available()) { // SoftwareSerial 사용
@@ -205,9 +217,9 @@ void loop() {
       rxBuffer[rxIndex++] = data;
     }
     
-    // 3.5 문자 시간 대기 (9600 baud에서 약 4ms)
+    // 3.5 문자 시간 대기 (4800 baud에서 약 7ms)
     unsigned long startTime = millis();
-    while (millis() - startTime < 4) {
+    while (millis() - startTime < 7) {
       if (rs485.available()) {
         data = rs485.read();
         if (rxIndex < 256) {
@@ -235,19 +247,19 @@ void loop() {
     rxIndex = 0; // 버퍼 리셋
   }
 
-  // 현재 값 출력 (디버깅용)
+  // 현재 값 출력 (디버깅용 - 첫 6개만)
   Serial.print("Temp: ");
-  Serial.print(temp, 1);
+  Serial.print(sensorData[0], 1);
   Serial.print("°C, Hum: ");
-  Serial.print(hum, 1);
+  Serial.print(sensorData[1], 1);
   Serial.print("%, Solar: ");
-  Serial.print(solar, 0);
+  Serial.print(sensorData[2], 0);
   Serial.print(" Lux, Wind: ");
-  Serial.print(wind_spd, 1);
+  Serial.print(sensorData[3], 1);
   Serial.print(" m/s, Dir: ");
-  Serial.print(wind_dir, 0);
+  Serial.print(sensorData[4], 0);
   Serial.print("°, Rain: ");
-  Serial.println(rain);
+  Serial.println(sensorData[5]);
   
   delay(1000); // 1초 대기
 } 
