@@ -1,0 +1,7 @@
+{
+    "port": "COM5",
+    "board": "arduino:avr:nano",
+    "programmer": "avrisp",
+    "sketch": "arduino_modbus_virtual_sensor\\arduino_modbus_virtual_sensor.ino",
+    "configuration": "cpu=atmega328old"
+}
