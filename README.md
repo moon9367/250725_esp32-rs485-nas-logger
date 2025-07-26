@@ -1,241 +1,232 @@
-# 📊 ESP32 RS485 NAS Logger 시스템
+# 🌤️ ESP32 RS485 Modbus RTU NAS Logger
 
-## 🎯 프로젝트 개요
+**실제 하드웨어 센서 장비와 호환되는 RS485 Modbus RTU 기반 데이터 수집 및 NAS 로깅 시스템**
 
-**Arduino Nano**에서 생성한 가상 센서 데이터를 **ESP32**가 **RS485 Modbus RTU**로 수집하여 **NAS 서버**에 **CSV 형태**로 저장하는 IoT 데이터 로깅 시스템입니다.
+## 📋 시스템 개요
 
-## 🏗️ 시스템 구성
+### 🎯 목적
+- RS485 Modbus RTU를 통한 센서 데이터 수집
+- WiFi를 통한 NAS 서버로의 실시간 데이터 전송
+- 1분 평균값 기반의 안정적인 데이터 로깅
 
+### 🏗️ 시스템 구성
 ```
-Arduino Nano → RS485 Modbus → ESP32 → WiFi → NAS Server
-(센서 생성)   (RTU 통신)    (수집+평균)  (HTTP)  (CSV 저장)
+[실제 센서 장비] ←→ [ESP32 Master] ←→ [WiFi] ←→ [NAS Server]
+     (Slave)           (Modbus RTU)              (PHP + CSV)
 ```
 
-### 1. **Arduino Nano** (Modbus RTU Slave)
-- **역할**: 가상 센서 데이터 생성 및 Modbus RTU 서버
-- **통신**: SoftwareSerial (4800 baud)
-- **핀 설정**: TX=9, RX=8, DE/RE=2
-- **Modbus ID**: 1
-- **레지스터**: 12개 (6개 float → 12개 word)
+### 🔧 핵심 특징
+- ✅ **실제 장비 프로토콜 호환**: 표준 Modbus RTU 프로토콜 준수
+- ✅ **멀티태스킹**: FreeRTOS 기반 동시 데이터 수집 및 전송
+- ✅ **안정적 통신**: RS485 + CRC16 검증
+- ✅ **자동 시간 동기화**: NTP 기반 절대 시간 정확성
+- ✅ **확장 가능**: 32개 센서 지원 (64개 Modbus 레지스터)
 
-### 2. **ESP32** (Modbus RTU Master + WiFi Client)
-- **역할**: 데이터 수집, 평균값 계산, NAS 전송
-- **통신**: RS485 Modbus RTU (4800 baud) + WiFi
-- **핀 설정**: TX=17, RX=16, DE/RE=4
-- **멀티태스킹**: FreeRTOS 기반 2개 Task
+## 📊 데이터 사양
 
-### 3. **NAS 서버** (Data Storage)
-- **역할**: CSV 데이터 수신 및 파일 저장
-- **웹서버**: Web Station (PHP)
-- **스크립트**: `upload.php`
+### 🌡️ 센서 데이터 (32개 Float)
+| 인덱스 | 센서 타입 | 범위 | 단위 | 설명 |
+|--------|-----------|------|------|------|
+| 0 | 온도 | 20.0~35.0 | °C | 대기 온도 |
+| 1 | 습도 | 30~90 | % | 상대 습도 |
+| 2 | 조도 | 0~1000 | Lux | 태양광 조도 |
+| 3 | 풍속 | 0~15.0 | m/s | 풍속 |
+| 4 | 풍향 | 0~359 | ° | 풍향 |
+| 5 | 강우 | 0 or 1 | - | 강우 감지 |
+| 6~31 | 확장 센서 | - | - | 추가 센서 데이터 |
 
-## 📊 센서 데이터
+### 📡 Modbus RTU 프로토콜
+- **시작 주소**: 0x00CB (203번)
+- **레지스터 수**: 64개 (128바이트)
+- **Float 개수**: 32개
+- **통신 속도**: 4800 baud
+- **데이터 형식**: IEEE754 Float (워드 간 리틀엔디언, 워드 내 빅엔디언)
 
-| 센서 | 범위 | 단위 | 설명 |
-|------|------|------|------|
-| 온도 | 20.0~35.0 | °C | 대기온도 |
-| 습도 | 30~90 | % | 상대습도 |
-| 조도 | 0~1000 | Lux | 일사량 |
-| 풍속 | 0~15.0 | m/s | 풍속 |
-| 풍향 | 0~359 | ° | 풍향 |
-| 강우센서 | 0 또는 1 | - | 0=맑음, 1=비옴 |
+### 📤 요청/응답 프레임
+```
+Master → Slave: 01 03 00 CB 00 40 35 C4
+Slave → Master: 01 03 80 [128 Bytes Data] CRC_L CRC_H
+```
 
-## ⚙️ 멀티태스킹 구조
+## 🛠️ 하드웨어 설정
 
-ESP32는 **FreeRTOS**를 사용하여 두 개의 Task로 동작합니다:
+### 📌 핀 연결 (ESP32)
+| 기능 | ESP32 핀 | 설명 |
+|------|----------|------|
+| RS485 TX | GPIO 17 | 송신 |
+| RS485 RX | GPIO 16 | 수신 |
+| RS485 DE/RE | GPIO 4 | 송수신 제어 |
 
-### **Task 1 (CPU Core 0): 데이터 수집**
-- **주기**: 5초마다 연속 수집
-- **동작**: Modbus RTU로 Arduino에서 센서 데이터 읽기
-- **저장**: 데이터 버퍼에 누적
+### 📌 핀 연결 (Arduino Nano)
+| 기능 | Arduino 핀 | 설명 |
+|------|------------|------|
+| RS485 TX | D9 | 송신 |
+| RS485 RX | D8 | 수신 |
+| RS485 DE/RE | D2 | 송수신 제어 |
 
-### **Task 2 (CPU Core 1): 데이터 전송**
-- **주기**: 매 분 00초마다
-- **동작**: 1분간 수집된 모든 데이터의 평균값 계산
-- **전송**: HTTP POST로 NAS에 CSV 전송
+### 🔌 RS485 모듈
+- **모델**: MAX485 또는 호환 모듈
+- **전원**: 3.3V (ESP32) / 5V (Arduino)
+- **통신**: 반이중 통신
+
+## ⚙️ 소프트웨어 아키텍처
+
+### 🔄 FreeRTOS 태스크 구조
+```
+Core 0: dataCollectionTask
+├── 5초마다 Modbus 요청
+├── 센서 데이터 수집
+└── 데이터 버퍼 저장
+
+Core 1: dataTransmissionTask  
+├── 매 분 정각 체크
+├── 1분 평균값 계산
+├── CSV 생성
+└── NAS로 HTTP POST
+```
+
+### 📊 데이터 처리 흐름
+1. **수집**: 5초마다 32개 센서값 수집
+2. **버퍼링**: 60개 샘플을 메모리에 저장
+3. **평균**: 1분간 수집된 데이터의 평균 계산
+4. **전송**: CSV 형식으로 NAS 서버 전송
+5. **로깅**: 연/월/일별 CSV 파일에 저장
 
 ## 📁 파일 구조
-
 ```
 250725_esp32-rs485-nas-logger/
-├── arduino_modbus_virtual_sensor/
-│   └── arduino_modbus_virtual_sensor.ino    # Arduino 가상센서
 ├── esp32_rs485_nas_logger/
-│   └── esp32_rs485_nas_logger.ino           # ESP32 메인 코드
-├── upload.php                               # NAS PHP 스크립트
-├── README.md                                # 프로젝트 문서
-└── 에이아이시드 RS485 Modbus Protocol.pptx  # 프로토콜 문서
+│   └── esp32_rs485_nas_logger.ino    # ESP32 마스터 코드
+├── arduino_modbus_virtual_sensor/
+│   └── arduino_modbus_virtual_sensor.ino  # Arduino 가상 센서
+├── upload.php                         # NAS PHP 서버 스크립트
+├── README.md                          # 프로젝트 문서
+└── 에이아이시드 RS485 Modbus Protocol.pptx  # 프로토콜 사양서
 ```
 
-## 🔧 설정 방법
+## 🚀 설치 및 실행
 
-### **1. Arduino Nano 설정**
-```cpp
-// arduino_modbus_virtual_sensor.ino
-#define RS485_TX 9
-#define RS485_RX 8  
-#define RS485_DE_RE 2
-// 통신속도: 4800 baud
-// Modbus Slave ID: 1
+### 📋 필수 라이브러리
+#### ESP32 (Arduino IDE)
+- `WiFi` (기본 포함)
+- `HTTPClient` (기본 포함)
+- `ArduinoJson` (선택사항)
+
+#### Arduino Nano
+- `SoftwareSerial` (기본 포함)
+
+### 🔧 ESP32 설정
+1. **WiFi 설정 수정**
+   ```cpp
+   const char* ssid = "YOUR_WIFI_SSID";
+   const char* password = "YOUR_WIFI_PASSWORD";
+   ```
+
+2. **NAS 서버 주소 수정**
+   ```cpp
+   const char* serverUrl = "http://YOUR_NAS_IP/upload.php";
+   ```
+
+3. **업로드 설정**
+   - 보드: ESP32 Dev Module
+   - 포트: 해당 COM 포트
+   - 업로드 속도: 115200
+
+### 🔧 Arduino 설정
+1. **업로드 설정**
+   - 보드: Arduino Nano
+   - 프로세서: ATmega328P (Old Bootloader)
+   - 포트: 해당 COM 포트
+
+### 🌐 NAS 서버 설정
+1. **PHP 스크립트 업로드**
+   - `upload.php`를 NAS의 웹 서버 디렉토리에 업로드
+   - 웹 서버에서 PHP 실행 권한 확인
+
+2. **폴더 구조 생성**
+   ```
+   /data/
+   ├── 2024/
+   │   ├── 01/
+   │   │   ├── 01.csv
+   │   │   └── 02.csv
+   │   └── 02/
+   └── 2025/
+   ```
+
+## 📊 CSV 데이터 형식
+
+### 📄 파일명
+```
+/data/YYYY/MM/DD.csv
+예: /data/2025/01/27.csv
 ```
 
-### **2. ESP32 설정**
-```cpp
-// esp32_rs485_nas_logger.ino
-#define RS485_TX 17
-#define RS485_RX 16
-#define RS485_DE_RE 4
-#define BAUDRATE 4800
-
-const char* ssid = "YOUR_WIFI_SSID";
-const char* password = "YOUR_WIFI_PASSWORD";
-const char* nas_url = "http://YOUR_NAS_IP:PORT/rs485/upload.php";
+### 📋 헤더
+```csv
+날짜시간,온도,습도,조도,풍향,풍속,강우
 ```
 
-### **3. NAS 설정**
-- Web Station 활성화
-- `/web/rs485/upload.php` 업로드
-- 폴더 권한 설정 (777)
-
-## 📈 데이터 형식
-
-### **CSV 형식**
-```
-YYYY-MM-DD HH:MM,온도,습도,조도,풍속,풍향,강우
-2025-07-27 12:34,28.5,65.2,450,5.2,180,0
+### 📊 데이터 예시
+```csv
+날짜시간,온도,습도,조도,풍향,풍속,강우
+2025-01-27 14:30,25.3,59.1,638,148,7.5,0
+2025-01-27 14:31,26.1,58.7,645,152,7.8,0
+2025-01-27 14:32,25.8,59.3,632,145,7.2,1
 ```
 
-### **NAS 저장 구조**
-```
-/web/rs485/
-├── 2025/
-│   ├── 07/
-│   │   ├── 20250727.csv
-│   │   └── 20250728.csv
-│   └── 08/
-│       └── 20250801.csv
-└── upload.php
-```
+## 🔍 문제 해결
 
-## 🚀 실행 방법
+### ❌ Modbus 통신 오류
+**증상**: "Modbus read fail" 또는 CRC Error
+**해결책**:
+1. RS485 핀 연결 확인
+2. 통신 속도 일치 확인 (4800 baud)
+3. DE/RE 핀 제어 확인
+4. 전원 공급 안정성 확인
 
-### **1. Arduino 업로드**
-```bash
-1. Arduino IDE에서 arduino_modbus_virtual_sensor.ino 열기
-2. 보드: Arduino Nano, 포트 선택
-3. 업로드
-4. 시리얼 모니터 (9600 baud) 확인
-```
+### ❌ WiFi 연결 실패
+**증상**: "WiFi 연결 실패"
+**해결책**:
+1. SSID/비밀번호 확인
+2. WiFi 신호 강도 확인
+3. ESP32 재부팅
+4. 정적 IP 설정 고려
 
-### **2. ESP32 업로드**
-```bash
-1. Arduino IDE에서 esp32_rs485_nas_logger.ino 열기
-2. 보드: ESP32 Dev Module, 포트 선택
-3. WiFi 정보, NAS URL 수정
-4. 업로드
-5. 시리얼 모니터 (115200 baud) 확인
-```
+### ❌ HTTP 전송 실패
+**증상**: "전송 실패: -1"
+**해결책**:
+1. NAS 서버 주소 확인
+2. 네트워크 연결 상태 확인
+3. PHP 스크립트 권한 확인
+4. 방화벽 설정 확인
 
-### **3. 동작 확인**
-```bash
-# ESP32 시리얼 모니터 예시
-=== 멀티태스킹 시작 ===
-수집 1 - 온도: 28.5°C, 습도: 65.2%, 강우: 0
-수집 2 - 온도: 29.1°C, 습도: 64.8%, 강우: 1
-...
-=== 1분간 수집 완료 (12개) ===
-평균값 - 온도: 28.8°C, 습도: 65.0%, 조도: 450 Lux...
-CSV: 2025-07-27 12:34,28.8,65.0,450,5.2,180,0.3
-전송 성공
-```
+### ❌ 데이터 수집 불안정
+**증상**: 일부 데이터 누락
+**해결책**:
+1. Modbus 통신 타이밍 조정
+2. 버퍼 크기 증가
+3. 재시도 로직 추가
+4. 전원 공급 안정성 확인
 
-## 🔍 테스트 방법
+## 🔧 고급 설정
 
-### **Modbus 통신 테스트**
-- Arduino 시리얼 모니터에서 "Modbus 응답 전송 완료" 확인
-- ESP32 시리얼 모니터에서 "Modbus 응답 파싱 성공!" 확인
+### ⚡ 성능 최적화
+- **통신 속도**: 4800 baud (안정성 우선)
+- **수집 주기**: 5초 (데이터 품질과 네트워크 부하 균형)
+- **버퍼 크기**: 60개 샘플 (1분 평균용)
+- **HTTP 타임아웃**: 15초 (안정적 전송)
 
-### **HTTP 전송 테스트**
-```bash
-curl -d "csv_line=2025-07-27 12:34,28.8,65.0,450,5.2,180,0" \
-     http://YOUR_NAS_IP:PORT/rs485/upload.php
-```
+### 🔒 보안 고려사항
+- **WiFi 암호화**: WPA2/WPA3 사용
+- **HTTPS**: 가능시 SSL/TLS 적용
+- **방화벽**: NAS 서버 접근 제한
+- **정기 백업**: CSV 데이터 백업
 
-### **NAS 저장 확인**
-- `/web/rs485/YYYY/MM/YYYYMMDD.csv` 파일 생성 확인
-- CSV 헤더 자동 추가 확인
+## 🚀 확장 가능성
 
-## 🛠️ 주요 특징
-
-### **안정성**
-- ✅ 멀티태스킹: 수집과 전송 동시 진행
-- ✅ 재시도 로직: HTTP 전송 실패 시 재시도
-- ✅ Mutex: Task 간 데이터 보호
-- ✅ 타임아웃: HTTP 15초 타임아웃
-
-### **정확성**
-- ✅ NTP 시간 동기화
-- ✅ CRC16 검증 (Modbus)
-- ✅ IEEE754 float 변환
-- ✅ 1분 평균값 계산
-
-### **확장성**
-- ✅ 실제 센서로 교체 가능
-- ✅ 센서 개수 확장 가능
-- ✅ 다른 NAS/서버 연동 가능
-- ✅ SD카드 백업 추가 가능
-
-## 🚨 문제 해결
-
-### **Modbus 통신 오류**
-```bash
-# Arduino 시리얼 출력 확인
-"Modbus 요청: 시작주소=0x0, 레지스터수=12"
-"전송 바이트: 0x1 0x3 0x18 ..."
-
-# ESP32 시리얼 출력 확인  
-"Modbus 응답 파싱 성공!"
-"센서[0]: XX.XX (0xXXXX, 0xXXXX)"
-```
-
-### **WiFi 연결 오류**
-- SSID, 비밀번호 확인
-- 2.4GHz WiFi 사용 확인
-- ESP32 WiFi 안테나 확인
-
-### **HTTP 전송 오류**
-- NAS IP, 포트 확인
-- Web Station 활성화 확인
-- upload.php 경로 확인
-- 방화벽 설정 확인
-
-## 📚 라이브러리
-
-### **Arduino Nano**
-- SoftwareSerial (내장)
-
-### **ESP32**
-- ModbusMaster
-- WiFi (내장)
-- HTTPClient (내장)
-- time.h (내장)
-
-## 🔗 확장 아이디어
-
-- 📱 **모바일 앱**: 실시간 데이터 모니터링
-- 📈 **대시보드**: Grafana, InfluxDB 연동
-- 🔔 **알림 시스템**: 임계값 초과 시 알림
-- 💾 **로컬 저장**: SD카드 백업
-- 🌐 **클라우드**: AWS, Azure 연동
-
-## 📞 지원
-
-문제 발생 시 다음 정보와 함께 문의해주세요:
-- Arduino 시리얼 모니터 출력
-- ESP32 시리얼 모니터 출력  
-- NAS 에러 로그
-- 하드웨어 연결 상태
-
----
-
-**🎯 이 시스템은 산업용 IoT 센서 네트워크의 기본 모델로 활용할 수 있습니다!** 
+### 📚 참고 자료
+- Modbus RTU 프로토콜 사양
+- ESP32 개발 가이드
+- Arduino SoftwareSerial 라이브러리
+- PHP HTTP 처리
