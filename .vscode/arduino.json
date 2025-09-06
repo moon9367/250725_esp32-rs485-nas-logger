@@ -1,7 +1,7 @@
 {
-    "port": "COM5",
-    "board": "arduino:avr:nano",
+    "port": "COM10",
+    "board": "esp32:esp32:esp32",
     "programmer": "avrisp",
-    "sketch": "arduino_modbus_virtual_sensor\\arduino_modbus_virtual_sensor.ino",
-    "configuration": "cpu=atmega328old"
+    "sketch": "esp32_rs485_nas_logger\\esp32_rs485_nas_logger.ino",
+    "configuration": "JTAGAdapter=default,PSRAM=disabled,PartitionScheme=default,CPUFreq=240,FlashMode=qio,FlashFreq=80,FlashSize=4M,UploadSpeed=921600,LoopCore=1,EventsCore=1,DebugLevel=none,EraseFlash=none,ZigbeeMode=default"
 }
