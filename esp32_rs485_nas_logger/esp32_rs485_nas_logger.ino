@@ -12,19 +12,19 @@
 #define SERIAL_MODE SERIAL_8N1  // 패리티 설정 (8N1 또는 8E1)
 
 // Modbus 읽기 설정 (센서 위치 탐색용)
-#define START_ADDR 0x00C3  // 시작 주소: 195 (0x00C3)
+#define START_ADDR 0x00BE  // 시작 주소: 190 (0x00BE)
 // 비표준 헤더 길이(바이트) 및 주소 보정(워드)
 #define DATA_HEADER_BYTES 6    // 응답 앞부분 헤더 바이트 수 (관측값: 6바이트)
 #define ADDR_WORD_SHIFT  (0)  // 주소 보정 - 문서 주소에서 -2워드 (실제 데이터 위치 조정)
 #define REG_COUNT  0x0040  // 레지스터 길이: 64개 (0x40)
 
-// 센서별 레지스터 주소 (시작 주소 195 기준)
-#define TEMP_ADDR   203  // 온도 센서 주소 (195+8)
-#define HUMID_ADDR  212  // 습도 센서 주소 (195+17)
-#define RAIN_ADDR   218  // 감우 센서 주소 (195+23)
-#define LIGHT_ADDR  227  // 일사 센서 주소 (195+32)
-#define WIND_SPD_ADDR 230  // 풍속 센서 주소 (195+35)
-#define WIND_DIR_ADDR 233  // 풍향 센서 주소 (195+38)
+// 센서별 레지스터 주소 (시작 주소 190 기준)
+#define TEMP_ADDR   203  // 온도 센서 주소 (190+13)
+#define HUMID_ADDR  212  // 습도 센서 주소 (190+22)
+#define RAIN_ADDR   218  // 감우 센서 주소 (190+28)
+#define LIGHT_ADDR  227  // 일사 센서 주소 (190+37)
+#define WIND_SPD_ADDR 230  // 풍속 센서 주소 (190+40)
+#define WIND_DIR_ADDR 233  // 풍향 센서 주소 (190+43)
 
 // 주소 고정 상수 제거 (START_ADDR 사용)
 const uint16_t FIXED_START_ADDR = START_ADDR;

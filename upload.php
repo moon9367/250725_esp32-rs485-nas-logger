@@ -18,7 +18,7 @@ $file = "$dir/{$date}.csv";
 
 // 3. 파일이 없으면 헤더 추가
 if (!file_exists($file)) {
-    file_put_contents($file, "datetime,temp,hum,solar,wind_dir,wind_spd,rain\n", FILE_APPEND);
+    file_put_contents($file, "datetime,temp,hum,rain,illuminance,wind_spd,wind_dir\n", FILE_APPEND);
 }
 
 // 4. csv_line 추가
