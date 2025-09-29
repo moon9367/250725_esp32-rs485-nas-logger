@@ -48,6 +48,7 @@ bool USE_ABSOLUTE_TIME = false; // 절대 시간 사용 (true) vs 상대 시간 
 // 시스템 초기화 플래그
 bool ntpSyncDone = false; // NTP 동기화 완료 플래그 (한번만 실행)
 bool systemReady = false; // 시스템 준비 완료 플래그
+bool wifiReconnectNeeded = false; // WiFi 재연결 필요 플래그
 unsigned long systemStartTime = 0; // 시스템 시작 시간
 
 // 데이터 버퍼링 설정
@@ -455,11 +456,14 @@ void handleSave() {
     stringToArray(newAddresses, TARGET_ADDRESSES, NUM_ADDRESSES);
   }
   
+  bool wifiChanged = false;
+  
   if (server.hasArg("wifi_ssid")) {
     String newSSID = server.arg("wifi_ssid");
     if (newSSID != WIFI_SSID) {
       Serial.println("📡 WiFi SSID 변경: " + WIFI_SSID + " → " + newSSID);
       WIFI_SSID = newSSID;
+      wifiChanged = true;
     }
   }
   
@@ -468,7 +472,14 @@ void handleSave() {
     if (newPassword != WIFI_PASSWORD) {
       Serial.println("🔑 WiFi 비밀번호 변경됨");
       WIFI_PASSWORD = newPassword;
+      wifiChanged = true;
     }
+  }
+  
+  // WiFi 설정이 변경된 경우 재연결 플래그 설정
+  if (wifiChanged) {
+    Serial.println("🔄 WiFi 설정 변경 감지 - 재연결 예약됨");
+    wifiReconnectNeeded = true; // loop()에서 재연결을 처리하도록 플래그 설정
   }
   
   // 기타 설정들
@@ -918,21 +929,15 @@ void processSerialCommands() {
         String newSSID = command.substring(10);
         WIFI_SSID = newSSID;
         Serial.println("🔧 WiFi SSID 변경: " + WIFI_SSID);
-        Serial.println("🔄 WiFi 재연결 시작...");
-        WiFi.disconnect();
-        delay(1000);
-        WiFi.begin(WIFI_SSID.c_str(), WIFI_PASSWORD.c_str());
-        Serial.println("⏳ WiFi 재연결 시도 중...");
+        wifiReconnectNeeded = true;
+        Serial.println("🔄 WiFi 재연결 예약됨 (다음 루프에서 실행)");
       }
       else if (command.startsWith("wifi_password:")) {
         String newPassword = command.substring(14);
         WIFI_PASSWORD = newPassword;
         Serial.println("🔧 WiFi 비밀번호 변경: " + WIFI_PASSWORD);
-        Serial.println("🔄 WiFi 재연결 시작...");
-        WiFi.disconnect();
-        delay(1000);
-        WiFi.begin(WIFI_SSID.c_str(), WIFI_PASSWORD.c_str());
-        Serial.println("⏳ WiFi 재연결 시도 중...");
+        wifiReconnectNeeded = true;
+        Serial.println("🔄 WiFi 재연결 예약됨 (다음 루프에서 실행)");
       }
       else if (command.startsWith("nas_url:")) {
         String newURL = command.substring(8);
@@ -984,6 +989,13 @@ void processSerialCommands() {
       else if (command == "save_settings") {
         saveAllSettings();
         Serial.println("💾 모든 설정이 저장되었습니다");
+      }
+      else if (command == "wifi_status") {
+        if (WiFi.status() == WL_CONNECTED) {
+          Serial.println("✅ WiFi 연결됨 - SSID: " + WiFi.SSID() + ", IP: " + WiFi.localIP().toString());
+        } else {
+          Serial.println("❌ WiFi 연결 안됨 - 상태: " + String(WiFi.status()));
+        }
       }
       else if (command == "reset") {
         Serial.println("🔄 ESP32 재부팅 중...");
@@ -1179,6 +1191,32 @@ void loop() {
     if (WiFi.status() != WL_CONNECTED) {
       Serial.println("❌ WiFi 연결 끊김, 재연결 시도...");
       reconnectWiFi();
+    }
+  }
+  
+  // WiFi 재연결 필요 시 재연결 시도
+  if (wifiReconnectNeeded) {
+    wifiReconnectNeeded = false;
+    Serial.println("🔄 WiFi 재연결 시도 (설정 변경 후)...");
+    WiFi.disconnect();
+    delay(1000);
+    WiFi.begin(WIFI_SSID.c_str(), WIFI_PASSWORD.c_str());
+    
+    // 재연결 결과 확인 (최대 10초 대기)
+    int attempts = 0;
+    while (WiFi.status() != WL_CONNECTED && attempts < 20) {
+      delay(500);
+      attempts++;
+      Serial.print(".");
+    }
+    Serial.println();
+    
+    if (WiFi.status() == WL_CONNECTED) {
+      Serial.println("✅ WiFi 재연결 성공!");
+      Serial.println("📡 SSID: " + WiFi.SSID());
+      Serial.println("🌐 IP: " + WiFi.localIP().toString());
+    } else {
+      Serial.println("❌ WiFi 재연결 실패 - 상태: " + String(WiFi.status()));
     }
   }
   

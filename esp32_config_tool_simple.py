@@ -191,6 +191,7 @@ class ESP32ConfigTool:
         ttk.Button(button_frame, text="Save Settings", command=self.save_settings).pack(side=tk.LEFT, padx=5)
         ttk.Button(button_frame, text="Load Settings", command=self.load_settings).pack(side=tk.LEFT, padx=5)
         ttk.Button(button_frame, text="Reset Settings", command=self.reset_settings).pack(side=tk.LEFT, padx=5)
+        ttk.Button(button_frame, text="WiFi Check/Reconnect", command=self.check_wifi_status).pack(side=tk.LEFT, padx=5)
         ttk.Button(button_frame, text="Reboot ESP32", command=self.reboot_esp32).pack(side=tk.LEFT, padx=5)
         
     def create_log_section(self, parent, row):
@@ -448,6 +449,50 @@ class ESP32ConfigTool:
                 messagebox.showerror("Reboot Error", f"Error occurred while rebooting ESP32:\n{str(e)}")
                 
         threading.Thread(target=reboot_thread, daemon=True).start()
+        
+    def check_wifi_status(self):
+        """Check WiFi connection status and reconnect if needed"""
+        def status_thread():
+            try:
+                if not self.connected:
+                    messagebox.showerror("Error", "Please connect to COM port first.")
+                    return
+                    
+                self.log("Checking WiFi status...")
+                response = self.send_command("wifi_status", 5.0)
+                self.log("WiFi Status Response: " + response)
+                
+                # WiFi 연결이 안되어 있으면 재연결 시도
+                if "WiFi 연결 안됨" in response or "연결 실패" in response or "status:" in response:
+                    self.log("WiFi 연결 안됨 감지 - 재연결 시도...")
+                    
+                    # WiFi 재연결 명령어 전송
+                    reconnect_commands = [
+                        f"wifi_ssid:{self.wifi_ssid.get()}",
+                        f"wifi_password:{self.wifi_password.get()}",
+                        "save_settings"
+                    ]
+                    
+                    for cmd in reconnect_commands:
+                        response = self.send_command(cmd, 3.0)
+                        self.log(f"RECONNECT: {cmd} -> {response[:50]}...")
+                        time.sleep(1)
+                    
+                    # 재연결 후 상태 다시 확인
+                    time.sleep(3)
+                    final_status = self.send_command("wifi_status", 5.0)
+                    self.log("Final WiFi Status: " + final_status)
+                    
+                    if "WiFi 연결됨" in final_status or "IP:" in final_status:
+                        self.log("✅ WiFi 재연결 성공!")
+                    else:
+                        self.log("❌ WiFi 재연결 실패")
+                        
+            except Exception as e:
+                self.log(f"ERROR: WiFi status check failed: {str(e)}")
+                messagebox.showerror("Status Check Error", f"Error occurred while checking WiFi status:\n{str(e)}")
+                
+        threading.Thread(target=status_thread, daemon=True).start()
         
     def save_local_settings(self):
         """Save to local settings file"""
