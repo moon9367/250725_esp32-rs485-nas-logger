@@ -1,0 +1,15 @@
+{
+  "wifi_ssid": "aiseed",
+  "wifi_password": "wjswkwjs1!",
+  "nas_url": "http://tspol.iptime.org:8888/rs485/upload.php",
+  "target_addresses": "203,212,218,227,230,233",
+  "zero_based": false,
+  "data_type": "FLOAT",
+  "registers_per_value": 2,
+  "byte_swap": false,
+  "word_swap": false,
+  "continuous_read": false,
+  "collection_interval": 300,
+  "transmission_interval": 1800,
+  "time_mode": false
+}

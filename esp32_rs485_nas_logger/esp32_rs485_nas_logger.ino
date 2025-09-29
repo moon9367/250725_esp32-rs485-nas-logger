@@ -11,23 +11,18 @@
 #define BAUDRATE 9600  // 원래 작동했던 9600bps로 복원
 #define SERIAL_MODE SERIAL_8N1  // 패리티 설정 (8N1 또는 8E1)
 
-// Modbus 읽기 설정 (센서 위치 탐색용)
-#define START_ADDR 0x00BE  // 시작 주소: 190 (0x00BE)
-// 비표준 헤더 길이(바이트) 및 주소 보정(워드)
-#define DATA_HEADER_BYTES 6    // 응답 앞부분 헤더 바이트 수 (관측값: 6바이트)
-#define ADDR_WORD_SHIFT  (0)  // 주소 보정 - 문서 주소에서 -2워드 (실제 데이터 위치 조정)
-#define REG_COUNT  0x0040  // 레지스터 길이: 64개 (0x40)
+// 센서 레지스터 주소 설정 (190부터 96개 레지스터 읽기)
+#define REG_START_ADDR 191  // 전체 레지스터 시작 주소
+#define REG_COUNT 96         // 전체 레지스터 길이 (96개)
 
-// 센서별 레지스터 주소 (시작 주소 190 기준)
-#define TEMP_ADDR   203  // 온도 센서 주소 (190+13)
-#define HUMID_ADDR  212  // 습도 센서 주소 (190+22)
-#define RAIN_ADDR   218  // 감우 센서 주소 (190+28)
-#define LIGHT_ADDR  227  // 일사 센서 주소 (190+37)
-#define WIND_SPD_ADDR 230  // 풍속 센서 주소 (190+40)
-#define WIND_DIR_ADDR 233  // 풍향 센서 주소 (190+43)
+// 각 센서의 정확한 레지스터 주소 (실제 데이터 위치 기반)
+#define TEMP_REG_ADDR 203    // 온도 레지스터 주소 (203 또는 192)
+#define HUMID_REG_ADDR 212   // 습도 레지스터 주소 (212 또는 201)
+#define RAIN_REG_ADDR 218   // 감우 레지스터 주소 (실제 위치)
+#define SOLAR_REG_ADDR 227   // 일사 레지스터 주소
+#define WIND_DIR_REG_ADDR 230 // 풍향 레지스터 주소
+#define WIND_SPEED_REG_ADDR 233 // 풍속 레지스터 주소
 
-// 주소 고정 상수 제거 (START_ADDR 사용)
-const uint16_t FIXED_START_ADDR = START_ADDR;
 
 const char* ssid = "TSPOL"; // 와이파이 이름 입력력
 const char* password = "mms56529983"; // 비밀번호 입력
@@ -36,13 +31,23 @@ const char* nas_url = "http://tspol.iptime.org:8888/rs485/upload.php"; // NAS IP
 
 ModbusMaster node;
 
-// 전역 변수 (Task 간 공유)
-volatile float sensorData[6] = {0, 0, 0, 0, 0, 0};
+// 전역 변수 (모든 센서 데이터)
+volatile float temperature = 0.0f;
+volatile float humidity = 0.0f;
+volatile float rain = 0.0f;
+volatile float solar = 0.0f;
+volatile float windSpeed = 0.0f;
+volatile float windDirection = 0.0f;
 volatile bool newDataAvailable = false;
 SemaphoreHandle_t dataMutex;
 
-// 수집된 데이터 저장용
-float dataBuffer[60][6]; // 최대 60개 데이터 저장
+// 수집된 데이터 저장용 (모든 센서)
+float tempBuffer[60]; // 최대 60개 온도 데이터 저장
+float humidBuffer[60]; // 최대 60개 습도 데이터 저장
+float rainBuffer[60]; // 최대 60개 감우 데이터 저장
+float solarBuffer[60]; // 최대 60개 일사 데이터 저장
+float windSpeedBuffer[60]; // 최대 60개 풍속 데이터 저장
+float windDirBuffer[60]; // 최대 60개 풍향 데이터 저장
 int dataCount = 0;
 unsigned long lastCollectTime = 0;
 
@@ -62,14 +67,15 @@ void setup() {
   node.preTransmission(preTransmission);
   node.postTransmission(postTransmission);
 
-  Serial.println("ESP32 RS485 NAS Logger 시작");
-  Serial.printf("RS485 설정: TX=%d, RX=%d, DE/RE=%d, Baudrate=%d\n", RS485_TX, RS485_RX, RS485_DE_RE, BAUDRATE);
-  Serial.printf("Modbus 설정: Slave ID=%d, START_ADDR=0x%04X, REG_COUNT=0x%04X (%d개)\n", 
-               SLAVE_ID, START_ADDR, REG_COUNT, REG_COUNT);
+  Serial.println("ESP32 Temperature Logger Start");
+  Serial.printf("RS485: TX=%d, RX=%d, DE/RE=%d, Baud=%d\n", RS485_TX, RS485_RX, RS485_DE_RE, BAUDRATE);
+  Serial.printf("Modbus: Slave ID=%d\n", SLAVE_ID);
+  Serial.printf("  TEMP_ADDR=%d, HUMID_ADDR=%d\n", TEMP_REG_ADDR, HUMID_REG_ADDR);
+  Serial.printf("  RAIN_ADDR=%d, SOLAR_ADDR=%d\n", RAIN_REG_ADDR, SOLAR_REG_ADDR);
+  Serial.printf("  WIND_SPEED_ADDR=%d, WIND_DIR_ADDR=%d\n", WIND_SPEED_REG_ADDR, WIND_DIR_REG_ADDR);
   
-  // RS485 핀 상태 확인
-  Serial.println("=== RS485 핀 상태 확인 ===");
-  Serial.printf("DE/RE 핀(%d) 상태: %s\n", RS485_DE_RE, digitalRead(RS485_DE_RE) ? "HIGH(송신)" : "LOW(수신)");
+  // RS485 설정 완료
+  Serial.println("RS485 setup complete");
 
   // WiFi 연결
   WiFi.begin(ssid, password);
@@ -83,12 +89,11 @@ void setup() {
   while (time(nullptr) < 100000) { delay(500); Serial.print("#"); }
   Serial.println("NTP Sync OK");
   
-  Serial.println("=== 시스템 초기화 완료 ===");
+  Serial.println("=== System initialization complete ===");
   
-  // 하드웨어 및 Modbus 연결 테스트
-  delay(2000); // 2초 대기 후 테스트
-  testRS485Hardware();
-  testModbusConnection();
+  // 시스템 준비 완료
+  delay(2000);
+  
   
   // Mutex 생성
   dataMutex = xSemaphoreCreateMutex();
@@ -114,7 +119,7 @@ void setup() {
     1                     // CPU Core (1번 코어)
   );
   
-  Serial.println("=== 멀티태스킹 시작 ===");
+  Serial.println("=== Multi-tasking start ===");
 }
 
 void loop() {
@@ -138,23 +143,15 @@ uint16_t calculateCRC(const uint8_t* data, uint16_t length) {
   return crc;
 }
 
-// 워드2개 → float 변환 (표준 Modbus Big-Endian: 상위워드 먼저, 각 워드는 Big-Endian)
-float regsToFloatBE(uint16_t highWord, uint16_t lowWord) {
-  uint8_t b[4];
-  b[0] = (highWord >> 8) & 0xFF;
-  b[1] = highWord & 0xFF;
-  b[2] = (lowWord >> 8) & 0xFF;
-  b[3] = lowWord & 0xFF;
-  float f;
-  memcpy(&f, b, 4);
-  return f;
-}
-
-// 리틀 엔디언 워드 순서로 Float 변환
-float regsToFloatLittleEndianWords(uint16_t word0, uint16_t word1) {
-  // 입력: word0 = 첫 번째 워드, word1 = 두 번째 워드
+// IEEE 754 Float 변환 함수 (요구사항 준수)
+// 2바이트(16비트)씩 끊어 → 1 워드로 인식
+// 한 워드 내 바이트 순서는 "빅 엔디언" → 0x71 0xD0 → 0x71D0
+// 워드 2개씩 묶어서 → 4바이트(32비트)
+// 워드 간 순서는 "리틀 엔디언" → 워드[1] + 워드[0]
+// 각 4바이트를 IEEE 754 float (32비트 부동소수점) 으로 해석
+float wordsToFloat(uint16_t word0, uint16_t word1) {
+  // word0, word1은 이미 빅 엔디언으로 해석된 워드
   // 리틀 엔디언 워드 순서: [word1][word0] → word1이 상위워드, word0이 하위워드
-  // 32비트 구성: [word1(16비트)][word0(16비트)]
   uint32_t raw = ((uint32_t)word1 << 16) | (uint32_t)word0;
   float f;
   memcpy(&f, &raw, 4);
@@ -164,9 +161,207 @@ float regsToFloatLittleEndianWords(uint16_t word0, uint16_t word1) {
 
 // 개별 센서 레지스터 읽기 함수는 현재 사용하지 않음 (연속 레지스터 읽기 사용)
 
-// 모든 센서 데이터 읽기 - 연속 레지스터 방식 (원래 작동했던 방식)
-bool readSensors(float* sensors) {
-  Serial.println("=== 연속 레지스터 읽기 시작 ===");
+// 온도 센서 데이터 읽기
+bool readTemperature(float* temp) {
+  return readSensorFromRegister(temp, TEMP_REG_ADDR, "Temperature", 15.0f, 45.0f);
+}
+
+// 습도 센서 데이터 읽기
+bool readHumidity(float* humid) {
+  return readSensorFromRegister(humid, HUMID_REG_ADDR, "Humidity", 30.0f, 90.0f);
+}
+
+// 감우 센서 데이터 읽기
+bool readRain(float* rainValue) {
+  // 218번 레지스터 먼저 시도
+  if (readSensorFromRegister(rainValue, 218, "Rain", 0.0f, 100.0f)) {
+    return true;
+  }
+  // 218번에 없으면 207번 시도
+  if (readSensorFromRegister(rainValue, 207, "Rain", 0.0f, 100.0f)) {
+    return true;
+  }
+  // 둘 다 없으면 실패
+  return false;
+}
+
+// 일사 센서 데이터 읽기  
+bool readSolar(float* solarValue) {
+  return readSensorFromRegister(solarValue, SOLAR_REG_ADDR, "Solar", 0.0f, 2000.0f);
+}
+
+// 풍속 센서 데이터 읽기
+bool readWindSpeed(float* windSpeedValue) {
+  return readSensorFromRegister(windSpeedValue, WIND_SPEED_REG_ADDR, "WindSpeed", 0.0f, 50.0f);
+}
+
+// 풍향 센서 데이터 읽기
+bool readWindDirection(float* windDirValue) {
+  return readSensorFromRegister(windDirValue, WIND_DIR_REG_ADDR, "WindDirection", 0.0f, 400.0f);
+}
+
+// 전체 레지스터 데이터를 한 번에 읽고 저장하는 전역 변수
+float allRegisters[96]; // 96개 레지스터 데이터 저장
+bool registersRead = false;
+
+// 전체 레지스터 읽기 함수
+bool readAllRegisters() {
+  Serial.println("=== Reading all registers 190-285 (96 registers) ===");
+  
+  // 시리얼 버퍼 완전 비우기
+  while (Serial2.available()) {
+    Serial2.read();
+  }
+  
+  // Modbus RTU 요청 프레임 구성 (190부터 96개 레지스터)
+  uint8_t requestPdu[] = { 
+    (uint8_t)SLAVE_ID, 0x03, 
+    (uint8_t)(REG_START_ADDR >> 8), (uint8_t)(REG_START_ADDR & 0xFF), 
+    (uint8_t)(REG_COUNT >> 8), (uint8_t)(REG_COUNT & 0xFF) 
+  };
+  uint16_t reqCrc = calculateCRC(requestPdu, 6);
+  uint8_t request[] = { 
+    (uint8_t)SLAVE_ID, 0x03, 
+    (uint8_t)(REG_START_ADDR >> 8), (uint8_t)(REG_START_ADDR & 0xFF), 
+    (uint8_t)(REG_COUNT >> 8), (uint8_t)(REG_COUNT & 0xFF), 
+    (uint8_t)(reqCrc & 0xFF), (uint8_t)(reqCrc >> 8) 
+  };
+  
+  // 송신 모드 전환 및 전송
+  digitalWrite(RS485_DE_RE, HIGH);
+  delay(5);
+  Serial2.write(request, 8);
+  Serial2.flush();
+  delay(20);
+  digitalWrite(RS485_DE_RE, LOW);
+  delay(10);
+  delay(100);
+  
+  // 응답 수신
+  byte response[500];
+  int responseIndex = 0;
+  unsigned long lastByteTime = 0;
+  bool frameStarted = false;
+  
+  unsigned long startTime = millis();
+  unsigned long firstByteTimeout = millis() + 5000;
+  
+  while (millis() - startTime < 8000) {
+    if (Serial2.available()) {
+      byte receivedByte = Serial2.read();
+      response[responseIndex++] = receivedByte;
+      lastByteTime = micros();
+      frameStarted = true;
+      
+      if (responseIndex == 1) {
+        firstByteTimeout = millis() + 8000;
+      }
+      
+      if (responseIndex >= 500) {
+        break;
+      }
+    }
+    
+    if (!frameStarted && millis() > firstByteTimeout) {
+      break;
+    }
+    
+    if (frameStarted && (micros() - lastByteTime) > 5000) {
+      break;
+    }
+    
+    delay(1);
+  }
+  
+  if (responseIndex > 0) {
+    // 데이터 파싱
+    int dataStartPos = 3; // 표준 Modbus 응답
+    if (responseIndex >= 3 && response[1] == 0x03) {
+      // 표준 응답
+    } else {
+      dataStartPos = 6; // 비표준 응답
+    }
+    
+    int dataLength = responseIndex - dataStartPos - 2;  // 마지막 2바이트는 CRC
+    
+    // 모든 레지스터 값을 Float로 변환하여 저장 및 출력
+    Serial.println("=== All Float values from registers 190-285 ===");
+    for (int i = 0; i < 96 && i * 4 + 4 <= dataLength; i++) {
+      uint16_t word0 = (response[dataStartPos + i * 4] << 8) | response[dataStartPos + i * 4 + 1];
+      uint16_t word1 = (response[dataStartPos + i * 4 + 2] << 8) | response[dataStartPos + i * 4 + 3];
+      
+      float value = wordsToFloat(word0, word1);
+      allRegisters[i] = value;
+      
+      int regNum = REG_START_ADDR + i;
+      Serial.printf("Reg[%d]=%04X %04X → %.2f", regNum, word0, word1, value);
+      
+      // 센서 범위 표시
+      if (value != 0.0f && value > -1000.0f && value < 10000.0f) {
+        if (value >= 15.0f && value <= 45.0f) {
+          Serial.print(" (TEMP!)");
+        } else if (value >= 30.0f && value <= 90.0f) {
+          Serial.print(" (HUMID!)");
+        } else if (value >= 0.0f && value <= 100.0f) {
+          Serial.print(" (RAIN!)");
+        } else if (value >= 0.0f && value <= 2000.0f) {
+          Serial.print(" (SOLAR!)");
+        } else if (value >= 0.0f && value <= 50.0f) {
+          Serial.print(" (WIND_SPEED!)");
+        } else if (value >= 0.0f && value <= 400.0f) {
+          Serial.print(" (WIND_DIR!)");
+        } else {
+          Serial.print(" (OTHER)");
+        }
+      }
+      Serial.println();
+    }
+    
+    registersRead = true;
+    Serial.println("=== All registers read complete ===");
+    return true;
+  }
+  
+  Serial.println("No register data received");
+  return false;
+}
+
+// 저장된 레지스터 데이터에서 특정 센서 값 읽기
+bool readSensorFromRegister(float* sensorValue, int regAddr, const char* sensorName, float minValue, float maxValue) {
+  Serial.printf("=== %s sensor read start (Reg[%d]) ===\n", sensorName, regAddr);
+  
+  // 레지스터 데이터가 읽혀졌는지 확인
+  if (!registersRead) {
+    Serial.printf("Register data not available for %s\n", sensorName);
+    return false;
+  }
+  
+  // 절대 주소에서 상대 위치 계산 (regAddr - REG_START_ADDR)
+  int regOffset = regAddr - REG_START_ADDR;
+  if (regOffset >= 0 && regOffset < 96) {
+    float value = allRegisters[regOffset];
+    Serial.printf("Reg[%d] → %.2f", regAddr, value);
+    
+    // 센서별 범위 검사
+    if (value >= minValue && value <= maxValue && value != 0.0f) {
+      *sensorValue = value;
+      Serial.printf(" (%s!)", sensorName);
+      Serial.println();
+      Serial.printf("%s read success: %.2f\n", sensorName, *sensorValue);
+      return true;
+    } else {
+      Serial.printf(" (out_of_range_%.1f~%.1f)", minValue, maxValue);
+      Serial.println();
+    }
+  }
+  
+  Serial.printf("No %s data found\n", sensorName);
+  return false;
+}
+
+// 기존 함수 (사용하지 않음)
+bool readSensorData(float* sensorValue, uint16_t startAddr, uint16_t regCount, const char* sensorName, float minValue, float maxValue) {
+  Serial.printf("=== %s sensor read start ===\n", sensorName);
   
   // 시리얼 버퍼 완전 비우기
   while (Serial2.available()) {
@@ -176,19 +371,19 @@ bool readSensors(float* sensors) {
   // Modbus RTU 요청 프레임 구성
   uint8_t requestPdu[] = { 
     (uint8_t)SLAVE_ID, 0x03, 
-    (uint8_t)(START_ADDR >> 8), (uint8_t)(START_ADDR & 0xFF), 
-    (uint8_t)(REG_COUNT >> 8), (uint8_t)(REG_COUNT & 0xFF) 
+    (uint8_t)(startAddr >> 8), (uint8_t)(startAddr & 0xFF), 
+    (uint8_t)(regCount >> 8), (uint8_t)(regCount & 0xFF) 
   };
   uint16_t reqCrc = calculateCRC(requestPdu, 6);
   uint8_t request[] = { 
     (uint8_t)SLAVE_ID, 0x03, 
-    (uint8_t)(START_ADDR >> 8), (uint8_t)(START_ADDR & 0xFF), 
-    (uint8_t)(REG_COUNT >> 8), (uint8_t)(REG_COUNT & 0xFF), 
+    (uint8_t)(startAddr >> 8), (uint8_t)(startAddr & 0xFF), 
+    (uint8_t)(regCount >> 8), (uint8_t)(regCount & 0xFF), 
     (uint8_t)(reqCrc & 0xFF), (uint8_t)(reqCrc >> 8) 
   };
   
   // 전송할 요청 데이터 출력
-  Serial.print("전송 요청: ");
+  Serial.printf("Send %s request: ", sensorName);
   for (int i = 0; i < 8; i++) {
     Serial.printf("0x%02X ", request[i]);
   }
@@ -204,18 +399,20 @@ bool readSensors(float* sensors) {
   delay(10);
   delay(100);
   
-  Serial.println("Modbus 요청 전송 완료");
+  Serial.printf("%s Modbus request sent\n", sensorName);
   
   // 응답 수신
-  byte response[300];
+  byte response[500];
   int responseIndex = 0;
   unsigned long lastByteTime = 0;
   bool frameStarted = false;
   
   unsigned long startTime = millis();
-  unsigned long firstByteTimeout = millis() + 3000;
+  unsigned long firstByteTimeout = millis() + 5000;
   
-  while (millis() - startTime < 5000) {
+  Serial.printf("Waiting for %s response...\n", sensorName);
+  
+  while (millis() - startTime < 8000) {
     if (Serial2.available()) {
       byte receivedByte = Serial2.read();
       response[responseIndex++] = receivedByte;
@@ -223,451 +420,99 @@ bool readSensors(float* sensors) {
       frameStarted = true;
       
       if (responseIndex == 1) {
-        Serial.printf("첫 바이트 수신: 0x%02X\n", receivedByte);
-        firstByteTimeout = millis() + 5000;
+        Serial.printf("First %s byte received: 0x%02X\n", sensorName, receivedByte);
+        firstByteTimeout = millis() + 8000;
       }
       
-      if (responseIndex >= 300) {
-        Serial.println("응답 버퍼 오버플로우");
+      if (responseIndex >= 500) {
+        Serial.printf("%s response buffer overflow - data may be truncated\n", sensorName);
         break;
       }
     }
     
     if (!frameStarted && millis() > firstByteTimeout) {
-      Serial.printf("첫 바이트 타임아웃 (대기시간: %lu ms)\n", millis() - startTime);
+      Serial.printf("%s first byte timeout (wait time: %lu ms)\n", sensorName, millis() - startTime);
       break;
     }
     
-    if (frameStarted && (micros() - lastByteTime) > 3000) {
-      Serial.println("프레임 종료 감지");
+    if (frameStarted && (micros() - lastByteTime) > 5000) {
+      Serial.printf("%s frame end detected (5ms no response)\n", sensorName);
       break;
     }
     
     delay(1);
   }
   
+  Serial.printf("%s response receive complete: %d bytes (receive time: %lu ms)\n", sensorName, responseIndex, millis() - startTime);
+  
   if (responseIndex > 0) {
-    Serial.print("Modbus 응답 (");
-    Serial.print(responseIndex);
-    Serial.print("바이트): ");
-    for (int i = 0; i < min(responseIndex, 20); i++) {
-      Serial.printf("0x%02X ", response[i]);
-    }
-    if (responseIndex > 20) Serial.print("...");
-    Serial.println();
-    
-    // 전체 응답 데이터 출력
-    Serial.println("전체 응답 데이터:");
-    for (int i = 0; i < responseIndex; i++) {
-      Serial.printf("%02X ", response[i]);
-      if ((i + 1) % 16 == 0) Serial.println();
-    }
-    Serial.println();
-    
-     // 센서 데이터 파싱 - 응답 구조 분석 후 적응적 파싱
-     Serial.println("=== 센서 데이터 파싱 (응답 구조 분석) ===");
-     
-     // 응답 구조 분석
-     Serial.printf("응답 길이: %d 바이트\n", responseIndex);
-     Serial.printf("첫 10바이트: ");
-     for (int i = 0; i < min(10, responseIndex); i++) {
-       Serial.printf("%02X ", response[i]);
-     }
-     Serial.println();
-     
-    // 실제 데이터 시작 위치 찾기 - 안정화된 로직
-    int dataStartPos = 10; // 기본값을 10으로 고정
-    
+    // 데이터 파싱
+    int dataStartPos = 3; // 표준 Modbus 응답
     if (responseIndex >= 3 && response[1] == 0x03) {
-      // 표준 Modbus 응답 (Slave ID, 0x03, Byte Count)
-      dataStartPos = 3;
-      Serial.println("표준 Modbus 응답 감지 (3바이트 헤더)");
-    } else if (responseIndex >= 6) {
-      // 비표준 헤더 분석
-      if (response[2] == 0x00 && response[3] == 0x00 && response[4] == 0x00 && response[5] == 0x00) {
-        dataStartPos = 6;
-        Serial.println("비표준 Modbus 응답 감지 (6바이트 헤더)");
+      // 표준 응답
+    } else {
+      dataStartPos = 6; // 비표준 응답
+    }
+    
+    int dataLength = responseIndex - dataStartPos - 2;  // 마지막 2바이트는 CRC
+    
+    if (dataLength < 4) {
+      Serial.printf("%s insufficient data length (minimum 4 bytes required)\n", sensorName);
+      return false;
+    }
+    
+    // 첫 번째 워드 쌍만 Float로 변환하여 센서 값 찾기
+    Serial.printf("=== %s first word pair Float conversion ===\n", sensorName);
+    float foundValue = 0.0f;
+    bool valueFound = false;
+    
+    // 첫 번째 워드 쌍만 읽기 (Word[0,1])
+    if (dataLength >= 4) {
+      uint16_t word0 = (response[dataStartPos + 0] << 8) | response[dataStartPos + 1];
+      uint16_t word1 = (response[dataStartPos + 2] << 8) | response[dataStartPos + 3];
+      
+      float value = wordsToFloat(word0, word1);
+      Serial.printf("Word[0,1]=%04X %04X → %.2f", word0, word1, value);
+      
+      // 센서별 범위 검사 - 현재 센서 범위만 확인
+      if (value >= minValue && value <= maxValue && value != 0.0f) {
+        foundValue = value;
+        valueFound = true;
+        Serial.printf(" (%s!)", sensorName);
       } else {
-        dataStartPos = 10;
-        Serial.println("비표준 Modbus 응답 감지 (10바이트 헤더)");
-      }
-    }
-     int dataLength = responseIndex - dataStartPos - 2;  // 마지막 2바이트는 CRC
-     
-     Serial.printf("데이터 시작 위치: %d, 데이터 길이: %d 바이트\n", dataStartPos, dataLength);
-     
-     if (dataLength < 0 || dataLength % 2 != 0) {
-       Serial.printf("데이터 길이 오류: %d 바이트 (짝수여야 함)\n", dataLength);
-       
-       // 홀수인 경우 마지막 바이트 제외하고 처리
-       dataLength = (dataLength / 2) * 2;
-       Serial.printf("수정된 데이터 길이: %d 바이트\n", dataLength);
-     }
-     
-     int wordCount = dataLength / 2;
-     Serial.printf("워드 개수: %d개\n", wordCount);
-     
-    // 워드 배열 생성 (문서 주소 대비 -2워드 보정 적용 가능하도록 주석 출력)
-     uint16_t wordArray[150];  // 최대 150개 워드 (300바이트)
-     for (int i = 0; i < wordCount && i < 150; i++) {
-       int byteIndex = dataStartPos + i * 2;
-       wordArray[i] = (response[byteIndex] << 8) | response[byteIndex + 1];  // Big-Endian
-     }
-    Serial.printf("주소 보정(워드): %d\n", ADDR_WORD_SHIFT);
-     
-     // 워드 배열 출력 (처음 20개만)
-     Serial.println("워드 배열 (처음 20개):");
-     for (int i = 0; i < min(20, wordCount); i++) {
-       Serial.printf("%04X ", wordArray[i]);
-       if ((i + 1) % 10 == 0) Serial.println();
-     }
-     Serial.println();
-     
-    // 워드 배열 직접 분석 - 실제 센서 값 위치 찾기
-    const char* sensorNames[] = {"온도", "습도", "감우", "일사", "풍속", "풍향"};
-    uint16_t sensorAddrs[] = {TEMP_ADDR, HUMID_ADDR, RAIN_ADDR, LIGHT_ADDR, WIND_SPD_ADDR, WIND_DIR_ADDR};
-    float parsed[6] = {0};
-    
-    Serial.println("=== 워드 배열 직접 분석 ===");
-    
-    // 워드 배열 전체 출력하여 실제 센서 값 위치 찾기
-    Serial.println("전체 워드 배열:");
-    for (int i = 0; i < wordCount; i++) {
-      Serial.printf("[%2d]:%04X ", i, wordArray[i]);
-      if ((i + 1) % 8 == 0) Serial.println();
-    }
-    Serial.println();
-    
-    // 실제 워드 배열에서 관찰된 값들로 센서 매핑
-    // A380 4287=온도/습도 후보, 003F 8000=1.0(감우), 6A7F 4370=240.0(풍향)
-    int tempIdx = -1, humidIdx = -1, rainIdx = -1, lightIdx = -1, windSpdIdx = -1, windDirIdx = -1;
-    
-    // 헤더 부분의 데이터도 확인 (온도 센서 위치)
-    Serial.println("=== 헤더 데이터 분석 ===");
-    
-    if (dataStartPos == 3 && responseIndex >= 7) {
-      // 표준 Modbus 응답일 때 - 실제 데이터 부분 분석 (response[3] 이후)
-      Serial.println("표준 Modbus 응답에서 센서 데이터 분석");
-      if (responseIndex >= 7) {
-        uint16_t w1 = (response[3] << 8) | response[4];  // 첫 번째 데이터 워드
-        uint16_t w2 = (response[5] << 8) | response[6];  // 두 번째 데이터 워드
-        
-        float val1 = regsToFloatLittleEndianWords(w1, w2);
-        float val2 = regsToFloatLittleEndianWords(w2, w1);
-        
-        Serial.printf("표준 응답 순서1: %04X %04X → %.3f\n", w1, w2, val1);
-        Serial.printf("표준 응답 순서2: %04X %04X → %.3f\n", w2, w1, val2);
-        
-        // 온도/습도 감지
-        if (val1 >= 15 && val1 <= 40 && tempIdx == -1) {
-          tempIdx = -3; parsed[0] = val1;
-          Serial.printf("*** 표준 응답에서 온도 발견: %.2f°C\n", val1);
-        } else if (val1 >= 50 && val1 <= 90 && humidIdx == -1) {
-          humidIdx = -3; parsed[1] = val1;
-          Serial.printf("*** 표준 응답에서 습도 발견: %.2f%%\n", val1);
-        }
-        
-        if (val2 >= 15 && val2 <= 40 && tempIdx == -1) {
-          tempIdx = -3; parsed[0] = val2;
-          Serial.printf("*** 표준 응답에서 온도 발견: %.2f°C\n", val2);
-        } else if (val2 >= 50 && val2 <= 90 && humidIdx == -1) {
-          humidIdx = -3; parsed[1] = val2;
-          Serial.printf("*** 표준 응답에서 습도 발견: %.2f%%\n", val2);
+        // 유효한 범위의 값만 표시 (디버깅용)
+        if (value != 0.0f && value > -1000.0f && value < 10000.0f) {
+          Serial.printf(" (out_of_range_%.1f~%.1f)", minValue, maxValue);
         }
       }
-    } else if (responseIndex >= 6) {
-      // 비표준 응답일 때 - 기존 로직
-      uint16_t w1 = (response[2] << 8) | response[3];  
-      uint16_t w2 = (response[4] << 8) | response[5];
-      
-      // 순서 1: [w1][w2]
-      float val1 = regsToFloatLittleEndianWords(w1, w2);
-      Serial.printf("헤더 순서1: %04X %04X → %.3f\n", w1, w2, val1);
-      
-      // 순서 2: [w2][w1] 
-      float val2 = regsToFloatLittleEndianWords(w2, w1);
-      Serial.printf("헤더 순서2: %04X %04X → %.3f\n", w2, w1, val2);
-      
-      // 온도/습도 후보로 판단 (더 넓은 범위로 확장)
-      if (val1 >= 15 && val1 <= 40 && tempIdx == -1) {
-        tempIdx = -2; // 특별 인덱스로 표시
-        parsed[0] = val1;
-        Serial.printf("*** 헤더 순서1에서 온도 발견: %.2f°C\n", val1);
-      } else if (val1 >= 50 && val1 <= 90 && humidIdx == -1) {
-        humidIdx = -2; // 특별 인덱스로 표시
-        parsed[1] = val1;
-        Serial.printf("*** 헤더 순서1에서 습도 발견: %.2f%%\n", val1);
-      }
-      
-      if (val2 >= 15 && val2 <= 40 && tempIdx == -1) {
-        tempIdx = -2; // 특별 인덱스로 표시
-        parsed[0] = val2;
-        Serial.printf("*** 헤더 순서2에서 온도 발견: %.2f°C\n", val2);
-      } else if (val2 >= 50 && val2 <= 90 && humidIdx == -1) {
-        humidIdx = -2; // 특별 인덱스로 표시
-        parsed[1] = val2;
-        Serial.printf("*** 헤더 순서2에서 습도 발견: %.2f%%\n", val2);
-      }
+      Serial.println();
     }
     
-    for (int i = 0; i < wordCount - 1; i++) {
-      uint16_t w0 = wordArray[i];      // 첫 번째 워드 (하위워드)
-      uint16_t w1 = wordArray[i + 1];  // 두 번째 워드 (상위워드)
-      // 리틀 엔디언 워드 순서: [w1][w0] → 32비트 float
-      float v = regsToFloatLittleEndianWords(w0, w1);
-      
-      // 디버그: 모든 float 값 출력
-      Serial.printf("워드[%d,%d]=%04X %04X → %.3f\n", i, i+1, w0, w1, v);
-      
-      // 온도 센서 (20-35도 범위)
-      if (v >= 20 && v <= 35 && tempIdx == -1) {
-        tempIdx = i;
-        Serial.printf("*** 온도 센서 발견: 워드[%d,%d]=%04X %04X → %.2f°C\n", i, i+1, w0, w1, v);
-      }
-      // 습도 센서 (50-90% 범위 확장)
-      else if (v >= 50 && v <= 90 && humidIdx == -1) {
-        humidIdx = i;
-        Serial.printf("*** 습도 센서 발견: 워드[%d,%d]=%04X %04X → %.2f%%\n", i, i+1, w0, w1, v);
-      }
-      // 감우 센서 (1.0 근처)
-      else if (fabsf(v - 1.0f) < 0.1f && rainIdx == -1) {
-        rainIdx = i;
-        Serial.printf("*** 감우 센서 발견: 워드[%d,%d]=%04X %04X → %.2f\n", i, i+1, w0, w1, v);
-      }
-      // 풍향 센서 (200-300도 범위)
-      else if (v >= 200 && v <= 300 && windDirIdx == -1) {
-        windDirIdx = i;
-        Serial.printf("*** 풍향 센서 발견: 워드[%d,%d]=%04X %04X → %.2f°\n", i, i+1, w0, w1, v);
-      }
+    if (valueFound) {
+      *sensorValue = foundValue;
+      Serial.printf("%s read success: %.2f\n", sensorName, *sensorValue);
+      return true;
+    } else {
+      Serial.printf("%s value not found (%.1f~%.1f range)\n", sensorName, minValue, maxValue);
+      *sensorValue = 0.0f;
+      return false;
     }
-    
-    // 발견된 센서 값들을 배열에 저장
-    if (tempIdx >= 0) {
-      uint16_t w0 = wordArray[tempIdx];
-      uint16_t w1 = wordArray[tempIdx + 1];
-      parsed[0] = regsToFloatLittleEndianWords(w0, w1);
-    }
-    if (humidIdx >= 0) {
-      uint16_t w0 = wordArray[humidIdx];
-      uint16_t w1 = wordArray[humidIdx + 1];
-      parsed[1] = regsToFloatLittleEndianWords(w0, w1);
-    }
-    if (rainIdx >= 0) {
-      uint16_t w0 = wordArray[rainIdx];
-      uint16_t w1 = wordArray[rainIdx + 1];
-      parsed[2] = regsToFloatLittleEndianWords(w0, w1);
-    }
-    if (windDirIdx >= 0) {
-      uint16_t w0 = wordArray[windDirIdx];
-      uint16_t w1 = wordArray[windDirIdx + 1];
-      parsed[5] = regsToFloatLittleEndianWords(w0, w1);
-    }
-    
-    Serial.printf("발견된 센서 위치: 온도=%d, 습도=%d, 감우=%d, 풍향=%d\n", 
-                  tempIdx, humidIdx, rainIdx, windDirIdx);
-    
-    // 자동 감지가 실패한 경우 고정 인덱스로 시도
-    if (tempIdx == -1) {
-      // 워드 배열에서 25-30도 근처 값 찾기 (온도)
-      for (int i = 0; i < wordCount - 1; i++) {
-        uint16_t w0 = wordArray[i];
-        uint16_t w1 = wordArray[i + 1];
-        float v = regsToFloatLittleEndianWords(w0, w1);
-        if (v >= 25.0 && v <= 30.0) {
-          tempIdx = i;
-          parsed[0] = v;
-          Serial.printf("고정 매핑 - 온도: 워드[%d,%d]=%04X %04X → %.2f°C\n", i, i+1, w0, w1, v);
-              break;
-        }
-      }
-    }
-    
-    if (humidIdx == -1) {
-      // 워드 배열에서 67도 근처 값 찾기 (습도)
-      for (int i = 0; i < wordCount - 1; i++) {
-        uint16_t w0 = wordArray[i];
-        uint16_t w1 = wordArray[i + 1];
-        float v = regsToFloatLittleEndianWords(w0, w1);
-        if (v >= 66.0 && v <= 68.0) {
-          humidIdx = i;
-          parsed[1] = v;
-          Serial.printf("고정 매핑 - 습도: 워드[%d,%d]=%04X %04X → %.2f%%\n", i, i+1, w0, w1, v);
-          break;
-        }
-      }
-    }
-    
-    if (rainIdx == -1) {
-      // 워드 배열에서 1.0 값 찾기 (감우)
-      for (int i = 0; i < wordCount - 1; i++) {
-        uint16_t w0 = wordArray[i];
-        uint16_t w1 = wordArray[i + 1];
-        float v = regsToFloatLittleEndianWords(w0, w1);
-        if (fabsf(v - 1.0f) < 0.01f) {
-          rainIdx = i;
-          parsed[2] = v;
-          Serial.printf("고정 매핑 - 감우: 워드[%d,%d]=%04X %04X → %.2f\n", i, i+1, w0, w1, v);
-                break;
-        }
-      }
-    }
-    
-    if (windDirIdx == -1) {
-      // 워드 배열에서 240.0 근처 값 찾기 (풍향)
-      for (int i = 0; i < wordCount - 1; i++) {
-        uint16_t w0 = wordArray[i];
-        uint16_t w1 = wordArray[i + 1];
-        float v = regsToFloatLittleEndianWords(w0, w1);
-        if (v >= 239.0 && v <= 241.0) {
-          windDirIdx = i;
-          parsed[5] = v;
-          Serial.printf("고정 매핑 - 풍향: 워드[%d,%d]=%04X %04X → %.2f°\n", i, i+1, w0, w1, v);
-          break;
-        }
-      }
-    }
-
-    // 센서별 유효 범위 적용 및 올바른 배열 순서로 저장
-    // sensors[0]=온도, sensors[1]=습도, sensors[2]=감우, sensors[3]=일사, sensors[4]=풍속, sensors[5]=풍향
-    sensors[0] = (parsed[0] > -20 && parsed[0] < 80) ? parsed[0] : 0.0f;   // 온도
-    sensors[1] = (parsed[1] >= 0 && parsed[1] <= 100) ? parsed[1] : 0.0f; // 습도
-    sensors[2] = (fabsf(parsed[2]) < 0.1f || fabsf(parsed[2]-1.0f) < 0.1f) ? (parsed[2] > 0.5f ? 1.0f : 0.0f) : 0.0f; // 감우
-    sensors[3] = (parsed[3] >= 0 && parsed[3] <= 2000) ? parsed[3] : 0.0f; // 일사
-    sensors[4] = (parsed[4] >= 0 && parsed[4] <= 50) ? parsed[4] : 0.0f;   // 풍속
-    sensors[5] = (parsed[5] >= 0 && parsed[5] <= 360) ? parsed[5] : 0.0f;  // 풍향
-    
-    // 디버그: 최종 센서 값 출력
-    Serial.printf("최종 센서 값: 온도=%.1f, 습도=%.1f, 감우=%.1f, 일사=%.1f, 풍속=%.1f, 풍향=%.1f\n",
-                  sensors[0], sensors[1], sensors[2], sensors[3], sensors[4], sensors[5]);
-    
-    Serial.println("=== 센서 데이터 파싱 완료 ===");
-    return true;
   }
   
-  Serial.println("Modbus 응답 없음");
+  Serial.printf("No %s Modbus response\n", sensorName);
   return false;
 }
 
-// RS485 하드웨어 테스트 함수
-void testRS485Hardware() {
-  Serial.println("=== RS485 하드웨어 테스트 ===");
-  
-  // DE/RE 핀 테스트
-  Serial.println("DE/RE 핀 테스트 중...");
-  digitalWrite(RS485_DE_RE, HIGH);
-  delay(100);
-  Serial.printf("DE/RE HIGH 상태: %s\n", digitalRead(RS485_DE_RE) ? "정상" : "오류");
-  
-  digitalWrite(RS485_DE_RE, LOW);
-  delay(100);
-  Serial.printf("DE/RE LOW 상태: %s\n", digitalRead(RS485_DE_RE) ? "오류" : "정상");
-  
-  // 시리얼 포트 테스트
-  Serial.println("시리얼 포트 테스트 중...");
-  Serial2.write(0xAA); // 테스트 바이트 전송
-  delay(10);
-  if (Serial2.available()) {
-    byte received = Serial2.read();
-    Serial.printf("루프백 테스트: 0x%02X 수신됨\n", received);
-  } else {
-    Serial.println("루프백 테스트: 응답 없음 (정상 - 센서가 없을 때)");
-  }
-  
-  Serial.println("하드웨어 테스트 완료");
-}
-
-// 간단한 Modbus 테스트 함수 (디버깅용)
-bool testModbusConnection() {
-  Serial.println("=== Modbus 연결 테스트 시작 ===");
-  
-  // 시리얼 버퍼 비우기
-  while (Serial2.available()) {
-    Serial2.read();
-  }
-  
-  // 짧은 테스트 요청 (2개 레지스터만 읽기)
-  uint8_t testPdu[] = { 
-    (uint8_t)SLAVE_ID, 0x03, 
-    (uint8_t)(START_ADDR >> 8), (uint8_t)(START_ADDR & 0xFF), 
-    0x00, 0x02  // 2개 레지스터만 읽기
-  };
-  uint16_t testCrc = calculateCRC(testPdu, 6);
-  uint8_t testRequest[] = { 
-    (uint8_t)SLAVE_ID, 0x03, 
-    (uint8_t)(START_ADDR >> 8), (uint8_t)(START_ADDR & 0xFF), 
-    0x00, 0x02, 
-    (uint8_t)(testCrc & 0xFF), (uint8_t)(testCrc >> 8) 
-  };
-  
-  Serial.print("테스트 요청: ");
-  for (int i = 0; i < 8; i++) {
-    Serial.printf("0x%02X ", testRequest[i]);
-  }
-  Serial.println();
-  
-  // 송신
-  digitalWrite(RS485_DE_RE, HIGH);
-  delay(5);
-  Serial2.write(testRequest, 8);
-  Serial2.flush();
-  delay(10);
-  digitalWrite(RS485_DE_RE, LOW);
-  delay(10);
-  
-  // 응답 수신
-  byte response[50];
-  int count = 0;
-  unsigned long lastByteTime = 0;
-  bool frameStarted = false;
-  
-  unsigned long startTime = millis();
-  while (millis() - startTime < 2000) {
-    if (Serial2.available()) {
-      byte receivedByte = Serial2.read();
-      response[count++] = receivedByte;
-      lastByteTime = micros();
-      frameStarted = true;
-      
-      if (count == 1) {
-        Serial.printf("테스트 첫 바이트 수신: 0x%02X\n", receivedByte);
-      }
-    }
-    
-    // 프레임 종료 감지
-    if (frameStarted && (micros() - lastByteTime) > 3000) { // 9600bps용 3ms로 조정
-      break;
-    }
-    
-    delay(1);
-  }
-  
-  Serial.print("테스트 응답 (");
-  Serial.print(count);
-  Serial.print("바이트): ");
-  for (int i = 0; i < count; i++) {
-    Serial.printf("0x%02X ", response[i]);
-  }
-  Serial.println();
-  
-  if (count > 0) {
-    Serial.println("Modbus 통신 가능 - 하드웨어 연결 정상");
-    return true;
-  } else {
-    Serial.println("Modbus 통신 불가 - 하드웨어 연결 확인 필요");
-    return false;
-  }
-}
-
-// CSV 문자열 생성
-String makeCSV(float* sensors) {
+// CSV 문자열 생성 (모든 센서)
+String makeCSV(float temp, float humid, float rain, float solar, float windSpeed, float windDir) {
   time_t now = time(nullptr);
   struct tm* t = localtime(&now);
   char buf[32];
   strftime(buf, sizeof(buf), "%Y-%m-%d %H:%M", t);
   char line[256];
-  snprintf(line, sizeof(line), "%s,%.1f,%.1f,%.0f,%.1f,%.0f,%.0f",
-    buf, sensors[0], sensors[1], sensors[2], sensors[3], sensors[4], sensors[5]);
-  // timestamp, temperature, humidity, rainfall, illuminance, wind_speed, wind_direction 순서
+  snprintf(line, sizeof(line), "%s,%.1f,%.1f,%.1f,%.1f,%.1f,%.1f",
+    buf, temp, humid, rain, solar, windSpeed, windDir);
+  // timestamp, temperature, humidity, rain, solar, windSpeed, windDirection 순서
   return String(line);
 }
 
@@ -684,44 +529,61 @@ void sendToNAS(String csv) {
     for (int retry = 0; retry < 2; retry++) {
       int code = http.POST(postData);
       if (code == 200) {
-        Serial.println("전송 성공");
+        Serial.println("Upload success");
         break;
       } else {
-        Serial.printf("전송 실패 (시도 %d/2): %d\n", retry+1, code);
+        Serial.printf("Upload failed (attempt %d/2): %d\n", retry+1, code);
         if (retry == 0) delay(1000);
       }
     }
     http.end();
   } else {
-    Serial.println("WiFi 연결 안됨");
+    Serial.println("WiFi not connected");
   }
 } 
 
-// Task 1: 데이터 수집 (5초마다 연속)
+
+// Task 1: All sensor data collection (every 10 seconds)
 void dataCollectionTask(void* parameter) {
   while (true) {
-    float sensors[6];
-    if (readSensors(sensors)) {
+    // 먼저 전체 레지스터 읽기
+    readAllRegisters();
+    
+    float temp, humid, rain, solar, windSpeed, windDir;
+    
+    // 모든 센서 데이터 읽기 (저장된 레지스터 데이터에서)
+    bool tempSuccess = readTemperature(&temp);
+    bool humidSuccess = readHumidity(&humid);
+    bool rainSuccess = readRain(&rain);
+    bool solarSuccess = readSolar(&solar);
+    bool windSpeedSuccess = readWindSpeed(&windSpeed);
+    bool windDirSuccess = readWindDirection(&windDir);
+    
+    // 최소 하나 이상의 센서에서 데이터를 읽었으면 저장
+    if (tempSuccess || humidSuccess || rainSuccess || solarSuccess || windSpeedSuccess || windDirSuccess) {
       // Mutex로 데이터 보호
       if (xSemaphoreTake(dataMutex, pdMS_TO_TICKS(100)) == pdTRUE) {
         // 데이터 버퍼에 저장
         if (dataCount < 60) {
-          for (int i = 0; i < 6; i++) {
-            dataBuffer[dataCount][i] = sensors[i];
-          }
+          tempBuffer[dataCount] = tempSuccess ? temp : 0.0f;
+          humidBuffer[dataCount] = humidSuccess ? humid : 0.0f;
+          rainBuffer[dataCount] = rainSuccess ? rain : 0.0f;
+          solarBuffer[dataCount] = solarSuccess ? solar : 0.0f;
+          windSpeedBuffer[dataCount] = windSpeedSuccess ? windSpeed : 0.0f;
+          windDirBuffer[dataCount] = windDirSuccess ? windDir : 0.0f;
           dataCount++;
           lastCollectTime = millis();
-          Serial.printf("수집 %d - 온도: %.1f°C, 습도: %.1f%%, 감우: %.0f, 일사: %.0fLux, 풍속: %.1fm/s, 풍향: %.0f°\n", 
-                       dataCount, sensors[0], sensors[1], sensors[2], sensors[3], sensors[4], sensors[5]);
+          Serial.printf("Collect %d - Temp: %.1fC, Humid: %.1f%%, Rain: %.1f, Solar: %.1f, WindSpeed: %.1f, WindDir: %.1f\n", 
+                       dataCount, temp, humid, rain, solar, windSpeed, windDir);
         }
         xSemaphoreGive(dataMutex);
       }
     }
-    vTaskDelay(pdMS_TO_TICKS(15000)); // 15초 대기 (1분에 4회 수집)
+    vTaskDelay(pdMS_TO_TICKS(10000)); // 10초 대기
   }
 }
 
-// Task 2: 평균값 계산 및 전송 (1분마다)
+// Task 2: Average calculation and upload (every minute)
 void dataTransmissionTask(void* parameter) {
   while (true) {
     // 현재 시간 확인
@@ -731,42 +593,76 @@ void dataTransmissionTask(void* parameter) {
     // 매 분 00초에 전송
     if (timeinfo->tm_sec == 0) {
       if (xSemaphoreTake(dataMutex, pdMS_TO_TICKS(1000)) == pdTRUE) {
-        if (dataCount >= 4) { // 최소 4개 이상 수집된 경우에만 전송
-          Serial.printf("=== 1분간 수집 완료 (%d개) ===\n", dataCount);
+        if (dataCount >= 3) { // 최소 3개 이상 수집된 경우에만 전송
+          Serial.printf("=== 1min collection complete (%d samples) ===\n", dataCount);
           
-          // 유효한 값만으로 평균값 계산
-          float avgSensors[6] = {0, 0, 0, 0, 0, 0};
-          int validCounts[6] = {0, 0, 0, 0, 0, 0}; // 각 센서별 유효한 값 개수
+          // 모든 센서의 유효한 값만으로 평균값 계산
+          float avgTemp = 0.0f, avgHumid = 0.0f, avgRain = 0.0f, avgSolar = 0.0f, avgWindSpeed = 0.0f, avgWindDir = 0.0f;
+          int tempValidCount = 0, humidValidCount = 0, rainValidCount = 0, solarValidCount = 0, windSpeedValidCount = 0, windDirValidCount = 0;
           
           for (int i = 0; i < dataCount; i++) {
-            for (int j = 0; j < 6; j++) {
-              float value = dataBuffer[i][j];
-              // 유효한 값인지 확인 (0이 아닌 값)
-              if (value > 0.01f) { // 0.01 이상인 값만 유효
-                avgSensors[j] += value;
-                validCounts[j]++;
-              }
+            float tempValue = tempBuffer[i];
+            float humidValue = humidBuffer[i];
+            float rainValue = rainBuffer[i];
+            float solarValue = solarBuffer[i];
+            float windSpeedValue = windSpeedBuffer[i];
+            float windDirValue = windDirBuffer[i];
+            
+            // 각 센서별 유효성 확인 및 합계 계산
+            if (tempValue > 0.01f) {
+              avgTemp += tempValue;
+              tempValidCount++;
+            }
+            
+            if (humidValue > 0.01f) {
+              avgHumid += humidValue;
+              humidValidCount++;
+            }
+            
+            if (rainValue > 0.01f) {
+              avgRain += rainValue;
+              rainValidCount++;
+            }
+            
+            if (solarValue > 0.01f) {
+              avgSolar += solarValue;
+              solarValidCount++;
+            }
+            
+            if (windSpeedValue > 0.01f) {
+              avgWindSpeed += windSpeedValue;
+              windSpeedValidCount++;
+            }
+            
+            if (windDirValue > 0.01f) {
+              avgWindDir += windDirValue;
+              windDirValidCount++;
             }
           }
           
-          // 유효한 값이 있는 센서만 평균 계산
-          for (int j = 0; j < 6; j++) {
-            if (validCounts[j] > 0) {
-              avgSensors[j] /= validCounts[j];
-              Serial.printf("센서[%d] 유효값: %d개 → 평균: %.2f\n", j, validCounts[j], avgSensors[j]);
-            } else {
-              avgSensors[j] = 0.0f; // 유효한 값이 없으면 0
-              Serial.printf("센서[%d] 유효값: 0개\n", j);
-            }
+          // 유효한 값이 있으면 평균 계산
+          if (tempValidCount > 0 || humidValidCount > 0 || rainValidCount > 0 || 
+              solarValidCount > 0 || windSpeedValidCount > 0 || windDirValidCount > 0) {
+            
+            if (tempValidCount > 0) avgTemp /= tempValidCount;
+            if (humidValidCount > 0) avgHumid /= humidValidCount;
+            if (rainValidCount > 0) avgRain /= rainValidCount;
+            if (solarValidCount > 0) avgSolar /= solarValidCount;
+            if (windSpeedValidCount > 0) avgWindSpeed /= windSpeedValidCount;
+            if (windDirValidCount > 0) avgWindDir /= windDirValidCount;
+            
+            Serial.printf("Valid samples - Temp: %d → %.2fC, Humid: %d → %.2f%%, Rain: %d → %.2f\n", 
+                         tempValidCount, avgTemp, humidValidCount, avgHumid, rainValidCount, avgRain);
+            Serial.printf("                   Solar: %d → %.2f, WindSpeed: %d → %.2f, WindDir: %d → %.2f\n",
+                         solarValidCount, avgSolar, windSpeedValidCount, avgWindSpeed, windDirValidCount, avgWindDir);
+            
+            // CSV 생성 및 전송
+            String csv = makeCSV(avgTemp, avgHumid, avgRain, avgSolar, avgWindSpeed, avgWindDir);
+            Serial.println("CSV: " + csv);
+            sendToNAS(csv);
+          } else {
+            Serial.println("No valid sensor data");
           }
-          
-          Serial.printf("평균값 - 온도: %.1f°C, 습도: %.1f%%, 감우: %.0f, 일사: %.0fLux, 풍속: %.1fm/s, 풍향: %.0f°\n",
-                       avgSensors[0], avgSensors[1], avgSensors[2], avgSensors[3], avgSensors[4], avgSensors[5]);
-          
-          // CSV 생성 및 전송
-          String csv = makeCSV(avgSensors);
-          Serial.println("CSV: " + csv);
-          sendToNAS(csv);
           
           // 버퍼 초기화
           dataCount = 0;
