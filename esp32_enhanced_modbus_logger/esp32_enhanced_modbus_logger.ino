@@ -41,15 +41,15 @@ bool WORD_SWAP = false;      // 워드 순서 바꾸기 (High/Low Word First)
 bool CONTINUOUS_READ = false; // 연속 레지스터 읽기 vs 개별 주소 읽기
 
 // 데이터 수집/전송 스케줄 설정 (500MB 유심 최적화)
-int DATA_COLLECTION_INTERVAL_SEC = 300; // 데이터 수집 주기 (초, 5분)
-int DATA_TRANSMISSION_INTERVAL_SEC = 1800; // 데이터 전송 주기 (초, 30분)
+int DATA_COLLECTION_INTERVAL_SEC = 60; // 데이터 수집 주기 (초, 1분)
+int DATA_TRANSMISSION_INTERVAL_SEC = 600; // 데이터 전송 주기 (초, 10분)
 bool USE_ABSOLUTE_TIME = false; // 절대 시간 사용 (true) vs 상대 시간 (false)
 
 // 시스템 초기화 플래그
 bool ntpSyncDone = false; // NTP 동기화 완료 플래그 (한번만 실행)
 bool systemReady = false; // 시스템 준비 완료 플래그
 bool wifiReconnectNeeded = false; // WiFi 재연결 필요 플래그
-unsigned long systemStartTime = 0; // 시스템 시작 시간
+time_t systemStartTime = 0; // 시스템 시작 시간 (실제 시간)
 
 // 데이터 버퍼링 설정
 String dataBuffer = ""; // 수집된 데이터를 저장할 버퍼
@@ -59,8 +59,8 @@ int bufferCount = 0; // 현재 버퍼에 저장된 데이터 개수
 int maxBufferCount = 10; // 최대 버퍼 크기 (전송 주기 / 수집 주기)
 
 // 네트워크 설정
-String WIFI_SSID = "TSPOL";
-String WIFI_PASSWORD = "mms56529983";
+String WIFI_SSID = "aiseed_iot_wifi";
+String WIFI_PASSWORD = "123456789#";
 String NAS_URL = "http://tspol.iptime.org:8888/rs485/upload.php";
 
 
@@ -168,8 +168,8 @@ void loadAllSettings() {
   DATA_TYPE = preferences.getString("data_type", "FLOAT");
   
   // 네트워크 설정 로드
-  WIFI_SSID = preferences.getString("wifi_ssid", "TSPOL");
-  WIFI_PASSWORD = preferences.getString("wifi_password", "mms56529983");
+  WIFI_SSID = preferences.getString("wifi_ssid", "aiseed_iot_wifi");
+  WIFI_PASSWORD = preferences.getString("wifi_password", "123456789#");
   NAS_URL = preferences.getString("nas_url", "http://tspol.iptime.org:8888/rs485/upload.php");
   
   // 타이밍 설정 로드 (통합됨)
@@ -180,10 +180,10 @@ void loadAllSettings() {
   WORD_SWAP = preferences.getBool("word_swap", false);
   CONTINUOUS_READ = preferences.getBool("continuous_read", true);
   
-  // 데이터 스케줄 설정 (500MB 유심 최적화 기본값)
-  DATA_COLLECTION_INTERVAL_SEC = preferences.getInt("collection_interval", 300); // 5분
-  DATA_TRANSMISSION_INTERVAL_SEC = preferences.getInt("transmission_interval", 1800); // 30분
-  USE_ABSOLUTE_TIME = preferences.getBool("use_absolute_time", false);
+  // 데이터 스케줄 설정 (사용자 설정 기본값 - 웹에서 변경 가능)
+  DATA_COLLECTION_INTERVAL_SEC = preferences.getInt("collection_interval", 60); // 1분 (기본값)
+  DATA_TRANSMISSION_INTERVAL_SEC = preferences.getInt("transmission_interval", 600); // 10분 (기본값)
+  USE_ABSOLUTE_TIME = preferences.getBool("use_absolute_time", true); // 절대시간 기본값
   
   preferences.end();
   Serial.println("📂 모든 설정이 로드되었습니다");
@@ -840,9 +840,11 @@ void collectData() {
     struct tm* t = localtime(&now);
     strftime(timeStr, sizeof(timeStr), "%Y-%m-%d %H:%M:%S", t);
   } else {
-    // 상대 시간 사용 (시스템 시작 시간 기준)
-    unsigned long elapsed = (millis() - systemStartTime) / 1000;
-    snprintf(timeStr, sizeof(timeStr), "REL+%lu", elapsed);
+    // 상대 시간 사용 (시스템 시작 시간 기준) - 실제 날짜/시간으로 변환
+    unsigned long elapsed = millis() / 1000; // 시스템 시작 후 경과 시간 (초)
+    time_t relativeTime = systemStartTime + elapsed; // 시스템 시작 시간에서 경과 시간 추가
+    struct tm* t = localtime(&relativeTime);
+    strftime(timeStr, sizeof(timeStr), "%Y-%m-%d %H:%M:%S", t);
   }
   
   if (CONTINUOUS_READ) {
@@ -1169,7 +1171,7 @@ void setup() {
   dataMutex = xSemaphoreCreateMutex();
   
   // 시스템 시작 시간 초기화 (상대 시간 기준점)
-  systemStartTime = millis();
+  systemStartTime = time(nullptr); // 현재 시간을 시스템 시작 시간으로 설정
   lastCollectionTime = 0;
   lastTransmissionTime = 0;
   
