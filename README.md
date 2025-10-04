@@ -42,6 +42,13 @@ bool ZERO_BASED = true;      // 1-based 주소 자동 보정
 String DATA_TYPE = "FLOAT";  // INT16, UINT16, INT32, FLOAT
 ```
 
+### 📋 Modbus 주소 체계 이해
+**기존 방식 (400203) → 새로운 방식 (203)**
+- **400203**: Modbus 표준 주소 (4 = Function Code 03, 00203 = 레지스터 주소)
+- **203**: 실제 레지스터 주소만 사용 (Function Code는 별도 설정)
+- **장점**: 더 직관적이고 설정이 간단해짐
+- **변환**: 400203 → Function Code: 03, Register: 203
+
 ### ⏱️ 타이밍 설정
 ```cpp
 int POLLING_INTERVAL_MS = 1000;  // 폴링 간격 (100ms ~ 5분)
@@ -74,23 +81,22 @@ String NAS_URL = "http://192.168.0.10/data_logger.php";
 요청 범위: 203~227 (25개 레지스터)
 Modbus 요청: Slave_ID, FC=0x03, Start=203, Count=25
 응답에서 추출: 주소 203, 212, 218, 227만 선별
+
+기존 방식과 비교:
+- 기존: 400203, 400212, 400218, 400227 (4번의 개별 요청)
+- 새로운: 203~227 범위 읽기 (1번의 효율적 요청)
 ```
 
 ## 📁 프로젝트 구조
 
 ```
-250725_esp32-rs485-nas-logger-1/
-├── esp32_rs485_nas_logger/
-│   ├── esp32_rs485_nas_logger.ino           # 기존 코드
-│   └── esp32_enhanced_modbus_logger.ino     # 새로운 스마트 코드 (v2.0)
-├── arduino_modbus_virtual_sensor/
-│   └── arduino_modbus_virtual_sensor.ino    # 테스트용 가상 센서
-├── esp32_config_tool.py                     # 기존 Python 도구
-├── esp32_enhanced_config_tool.py            # 새로운 Python 도구 (v2.0)
-├── data_logger.php                           # 향상된 PHP 서버
-├── enhanced_config_example.json             # 향상된 설정 예시
-├── requirements.txt                          # Python 패키지 요구사항
-└── README_ENHANCED.md                       # 이 문서 (v2.0)
+250725_esp32-rs485-nas-logger/
+├── esp32_enhanced_modbus_logger/
+│   └── esp32_enhanced_modbus_logger.ino     # 스마트 코드 (v2.0)
+├── esp32_config_tool_simple.py              # Python 설정 도구
+├── data_logger.php                           # PHP 서버
+├── esp32_settings.json                       # 설정 파일
+└── README.md                                 # 이 문서 (v2.0)
 ```
 
 ## 🛠️ 설치 및 설정
@@ -98,7 +104,7 @@ Modbus 요청: Slave_ID, FC=0x03, Start=203, Count=25
 ### 📱 ESP32 펌웨어 업로드
 ```bash
 # Arduino IDE에서 파일 업로드
-esp32_enhanced_modbus_logger.ino
+esp32_enhanced_modbus_logger/esp32_enhanced_modbus_logger.ino
 
 # 필수 라이브러리:
 # - ModbusMaster
@@ -119,19 +125,19 @@ esp32_enhanced_modbus_logger.ino
 ### 🐍 Python 설정 도구
 ```bash
 # 인터랙티브 설정
-python esp32_enhanced_config_tool.py
+python esp32_config_tool_simple.py
 
 # 포트 지정
-python esp32_enhanced_config_tool.py --port COM3
+python esp32_config_tool_simple.py --port COM3
 
 # 설정 파일 로드
-python esp32_enhanced_config_tool.py --config-file enhanced_config_example.json
+python esp32_config_tool_simple.py --config-file esp32_settings.json
 
 # 실시간 모니터링
-python esp32_enhanced_config_tool.py --monitor --monitor-duration 300
+python esp32_config_tool_simple.py --monitor --monitor-duration 300
 
 # 빠른 초기화
-python esp32_enhanced_config_tool.py --quick-setup
+python esp32_config_tool_simple.py --quick-setup
 ```
 
 ## 📊 설정 예시
@@ -209,9 +215,13 @@ python esp32_enhanced_config_tool.py --quick-setup
 ### 🔧 Modbus 설정 섹션
 - **Slave ID**: 1~247 범위 설정
 - **Function Code**: 0x01~0x04 선택 (설명 포함)
-- **주소 리스트**: 콤마로 구분된 텍스트 입력
+- **주소 리스트**: 콤마로 구분된 텍스트 입력 (예: 203,212,218,227)
 - **1-Based 주소**: 체크박스로 자동 주소 보정
 - **데이터 타입**: INT16/UINT16/INT32/FLOAT 선택
+
+**주소 입력 방식**:
+- ✅ **새로운 방식**: `203, 212, 218, 227` (직관적)
+- ❌ **기존 방식**: `400203, 400212, 400218, 400227` (복잡함)
 
 ### 🌐 네트워크 설정 섹션
 - **WiFi SSID**: 네트워크 이름 입력
